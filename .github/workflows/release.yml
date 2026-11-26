@@ -1,44 +1,81 @@
 name: Release
 
-# Builds the desktop app for Linux, macOS and Windows when a version tag is pushed, and attaches
-# the archives to a GitHub release.
+# Pushing a version tag (for example v0.1.0) runs the full CI, builds the desktop app for Linux,
+# macOS (Apple Silicon and Intel) and Windows, and attaches the archives plus checksums to a
+# GitHub release. The tag must match the workspace version in Cargo.toml.
 on:
   push:
     tags: ["v*"]
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  verify-version:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tag must equal the workspace version
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c \
+            "import sys, json; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name'] == 'app'))")
+          echo "Cargo version: $VERSION, tag: $GITHUB_REF_NAME"
+          [ "$GITHUB_REF_NAME" = "v$VERSION" ] || [ "${GITHUB_REF_NAME%%-*}" = "v$VERSION" ] || {
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $VERSION in Cargo.toml"; exit 1; }
+
   build:
+    name: Build ${{ matrix.name }}
+    needs: [ci, verify-version]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            name: linux-x86_64
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
             binary: dbiever
             archive: tar.gz
-          - os: macos-latest
-            name: macos-aarch64
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
             binary: dbiever
             archive: tar.gz
-          - os: windows-latest
-            name: windows-x86_64
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            binary: dbiever
+            archive: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
             binary: dbiever.exe
             archive: zip
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p app --locked
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release -p app --locked --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
           NAME="dbiever-${GITHUB_REF_NAME}-${{ matrix.name }}"
           mkdir "$NAME"
-          cp "target/release/${{ matrix.binary }}" README.md "$NAME/"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" LICENSE README.md "$NAME/"
           if [ "${{ matrix.archive }}" = "zip" ]; then
             7z a "$NAME.zip" "$NAME"
             echo "ASSET=$NAME.zip" >> "$GITHUB_ENV"
@@ -46,22 +83,31 @@ jobs:
             tar czf "$NAME.tar.gz" "$NAME"
             echo "ASSET=$NAME.tar.gz" >> "$GITHUB_ENV"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: ${{ env.ASSET }}
+          if-no-files-found: error
 
   publish:
+    name: Publish release
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create the release and attach the artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PRERELEASE=""
+          case "$GITHUB_REF_NAME" in *-*) PRERELEASE="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag $PRERELEASE
