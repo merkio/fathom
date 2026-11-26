@@ -93,7 +93,13 @@ impl Backend {
                 };
                 runtime.block_on(async move {
                     while let Some(command) = command_rx.recv().await {
-                        tokio::spawn(handle(shared.clone(), command));
+                        if command.is_ordered() {
+                            // Quick writes run in arrival order, so a later read or write
+                            // always sees (or follows) an earlier one.
+                            handle(shared.clone(), command).await;
+                        } else {
+                            tokio::spawn(handle(shared.clone(), command));
+                        }
                     }
                 });
             })
