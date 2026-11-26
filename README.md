@@ -75,7 +75,7 @@ Set in the connection dialog's **Advanced** box, one `key=value` per line.
 | PostgreSQL | `sslmode` | `disable`, `allow`, `prefer` (default), `require`, `verify-ca`, `verify-full` |
 | PostgreSQL | `sslrootcert` | CA certificate file used to verify the server (needed for private CAs) |
 | PostgreSQL | `sslcert`, `sslkey` | Client certificate and key (mutual TLS) |
-| MySQL / MariaDB | `sslmode`, `sslrootcert`, `sslcert`, `sslkey` | Same meaning as for PostgreSQL (`verify-full` verifies the host name) |
+| MySQL / MariaDB | `sslmode`, `sslrootcert`, `sslcert`, `sslkey` | Same meaning as for PostgreSQL (`verify-full` verifies the host name). Default `prefer` uses TLS when the server offers it. MySQL 8+ accounts using `caching_sha2_password` need TLS: with `sslmode=disable` the connection fails with an RSA error |
 | SQLite | `mode=ro` | Open the file read-only |
 | SQLite | `create=true` | Create the file if it does not exist (off: a typo is an error) |
 

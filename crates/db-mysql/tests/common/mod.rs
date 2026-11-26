@@ -66,13 +66,19 @@ pub async fn server() -> Server {
     panic!("set DBIEVER_TEST_MYSQL_HOST (and friends) or enable the `containers` feature");
 }
 
-/// Profile and password for the server, with TLS off (the test servers have none).
+/// Profile and password for the server, using the driver's default `sslmode` (prefer TLS).
+///
+/// MySQL 8+ authenticates with `caching_sha2_password`, which only works over a plaintext
+/// connection through an RSA exchange this build does not include, so TLS must stay on. Set
+/// `DBIEVER_TEST_MYSQL_SSLMODE` to override (e.g. `disable` for a server without TLS).
 pub fn profile_for(s: &Server) -> (ConnectionProfile, SecretString) {
     let mut profile =
         ConnectionProfile::new("integration", DriverKind::new("mysql"), s.host.clone());
     profile.port = Some(s.port);
     profile.username = s.user.clone();
     profile.database = Some(s.database.clone());
-    profile.options.insert("sslmode".into(), "disable".into());
+    if let Ok(mode) = std::env::var("DBIEVER_TEST_MYSQL_SSLMODE") {
+        profile.options.insert("sslmode".into(), mode);
+    }
     (profile, SecretString::from(s.password.clone()))
 }
