@@ -19,6 +19,21 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # Catches platform-specific build problems early. Informational until it has been seen green on
+  # all three systems; then remove `continue-on-error`.
+  cross-platform-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p app --locked
+
   postgres-integration:
     runs-on: ubuntu-latest
     services:
@@ -41,6 +56,38 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p db-postgres --features integration
+
+  mysql-integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["mysql:8.4", "mariadb:11"]
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: test
+          MARIADB_ROOT_PASSWORD: test
+          MARIADB_DATABASE: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -ptest || mariadb-admin ping -h 127.0.0.1 -uroot -ptest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DBIEVER_TEST_MYSQL_HOST: 127.0.0.1
+      DBIEVER_TEST_MYSQL_USER: root
+      DBIEVER_TEST_MYSQL_PASSWORD: test
+      DBIEVER_TEST_MYSQL_DB: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p db-mysql --features integration
 
   deny:
     runs-on: ubuntu-latest

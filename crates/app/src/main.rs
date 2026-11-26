@@ -1,5 +1,8 @@
 //! Composition root: the only place that knows concrete adapter types.
 
+// A GUI program: no console window on Windows release builds.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod logging;
 
 use std::path::PathBuf;
@@ -105,6 +108,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut drivers = DriverRegistry::new();
     drivers.register(Arc::new(db_postgres::PostgresDriver::new()));
+    drivers.register(Arc::new(db_mysql::MySqlDriver::new()));
     drivers.register(Arc::new(db_sqlite::SqliteDriver::new()));
 
     let secrets = secret_store();

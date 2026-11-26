@@ -15,6 +15,7 @@ workspace = true
 domain = { path = "../domain" }
 application = { path = "../application" }
 storage = { path = "../storage" }
+db-mysql = { path = "../db-mysql" }
 db-postgres = { path = "../db-postgres" }
 db-sqlite = { path = "../db-sqlite" }
 llm-anthropic = { path = "../llm-anthropic" }
