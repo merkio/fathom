@@ -1217,6 +1217,17 @@ dependencies = [
 [[package]]
 name = "db-mysql"
 version = "0.1.0"
+dependencies = [
+ "application",
+ "async-trait",
+ "domain",
+ "futures",
+ "secrecy",
+ "sqlx",
+ "test-support",
+ "testcontainers-modules",
+ "tokio",
+]
 
 [[package]]
 name = "db-postgres"
