@@ -3,9 +3,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use domain::{ConnectionId, DomainError, QueryRequest, QueryResult, SchemaTree};
+use domain::{ConnectionId, Dialect, DomainError, QueryRequest, QueryResult, SchemaTree};
 
 use crate::error::UseCaseError;
+use crate::llm::SqlSafetyGuard;
 use crate::ports::{Clock, DbSession, HistoryEntry, IntrospectScope, QueryHistoryRepository};
 
 pub struct BrowseSchema;
@@ -54,6 +55,29 @@ impl ExecuteQuery {
             clock,
             options,
         }
+    }
+
+    /// Like `execute`, but in read-only mode only plain reads run: anything the safety guard
+    /// classifies as write, DDL, admin or unknown (including SQL that does not parse) is blocked
+    /// before it reaches the database and is not recorded in the history.
+    pub async fn execute_guarded(
+        &self,
+        connection: ConnectionId,
+        session: &dyn DbSession,
+        req: QueryRequest,
+        dialect: &Dialect,
+        read_only: bool,
+    ) -> Result<QueryResult, UseCaseError> {
+        if read_only {
+            let report = SqlSafetyGuard.classify(&req.text, dialect);
+            if !report.is_read_only() {
+                let kind = report.overall().map_or("empty", |k| k.label());
+                return Err(UseCaseError::Blocked(format!(
+                    "Read-only mode: this connection only allows plain reads, found a `{kind}` statement"
+                )));
+            }
+        }
+        self.execute(connection, session, req).await
     }
 
     /// Runs the request on the session and records it in the history. A failing history write

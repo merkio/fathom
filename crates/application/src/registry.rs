@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use domain::{DriverKind, ProviderId};
+use domain::{DriverKind, ProviderId, SecretRef};
 
 use crate::ports::{DatabaseDriver, LlmProvider};
 
@@ -42,6 +42,7 @@ impl DriverRegistry {
 #[derive(Default)]
 pub struct LlmRegistry {
     providers: BTreeMap<ProviderId, Arc<dyn LlmProvider>>,
+    key_refs: BTreeMap<ProviderId, SecretRef>,
 }
 
 impl LlmRegistry {
@@ -51,6 +52,18 @@ impl LlmRegistry {
 
     pub fn register(&mut self, provider: Arc<dyn LlmProvider>) {
         self.providers.insert(provider.id(), provider);
+    }
+
+    /// Registers a provider that authenticates with an API key stored under `key`, so the
+    /// settings screen knows where to save the key the user enters.
+    pub fn register_with_key(&mut self, provider: Arc<dyn LlmProvider>, key: SecretRef) {
+        self.key_refs.insert(provider.id(), key);
+        self.register(provider);
+    }
+
+    /// The secret-store key of a provider that needs an API key.
+    pub fn key_ref(&self, id: &ProviderId) -> Option<&SecretRef> {
+        self.key_refs.get(id)
     }
 
     pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn LlmProvider>> {
