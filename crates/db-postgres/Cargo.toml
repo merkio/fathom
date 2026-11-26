@@ -6,3 +6,22 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# Integration tests against a real PostgreSQL (env vars or testcontainers). Off by default.
+integration = []
+containers = ["integration", "dep:testcontainers-modules"]
+
+[dependencies]
+domain = { path = "../domain" }
+application = { path = "../application" }
+async-trait = "0.1"
+secrecy = "0.10"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "chrono", "uuid", "json"] }
+tokio = { version = "1", features = ["time", "sync"] }
+futures = "0.3"
+testcontainers-modules = { version = "0.15", features = ["postgres"], optional = true }
+
+[dev-dependencies]
+test-support = { path = "../test-support" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

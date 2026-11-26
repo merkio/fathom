@@ -1,6 +1,7 @@
 //! Fakes and shared helpers for tests. Application tests use these instead of real databases
 //! or networks.
 
+pub mod driver_contract;
 pub mod fake_driver;
 pub mod fake_llm;
 pub mod in_memory;
