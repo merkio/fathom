@@ -12,7 +12,7 @@ workspace = true
 domain = { path = "../domain" }
 application = { path = "../application" }
 async-trait = "0.1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 secrecy = "0.10"
 uuid = "1"
 
