@@ -4,7 +4,9 @@
 use std::collections::HashSet;
 
 use application::ports::HistoryEntry;
-use domain::{ConnectionId, ConnectionProfile, DriverKind, QueryResult, SchemaTree};
+use application::sql::{CompletionRequest, Suggestion, changes_schema};
+use application::usecases::CompleteSql;
+use domain::{ConnectionId, ConnectionProfile, Dialect, DriverKind, QueryResult, SchemaTree};
 
 use crate::bridge::{Command, Event, SessionId, TabId};
 use crate::form::ConnectionForm;
@@ -27,6 +29,7 @@ pub struct OpenConnection {
     pub session: SessionId,
     pub connection: ConnectionId,
     pub name: String,
+    pub dialect: Dialect,
     pub schema: Load<SchemaTree>,
 }
 
@@ -38,13 +41,31 @@ pub enum TabState {
     Failed(String),
 }
 
+/// Position of a tab's text and cursor, used to tell when the popup state is stale.
+type Anchor = (usize, usize);
+
+/// Autocomplete popup state of one editor tab.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CompletionState {
+    /// Highlighted row of the popup.
+    pub selected: usize,
+    selected_for: Option<Anchor>,
+    /// Where the user pressed Esc; the popup stays closed until the text or cursor changes.
+    dismissed: Option<Anchor>,
+    /// Where the popup was requested explicitly (Ctrl+Space), so it may show with an empty prefix.
+    requested: Option<Anchor>,
+}
+
 #[derive(Debug)]
 pub struct QueryTab {
     pub id: TabId,
     pub session: SessionId,
     pub title: String,
     pub text: String,
+    /// The statement last sent for execution (the text may be edited while it runs).
+    executed: String,
     pub state: TabState,
+    pub completion: CompletionState,
 }
 
 pub struct Presenter {
@@ -54,16 +75,18 @@ pub struct Presenter {
     pub tabs: Vec<QueryTab>,
     pub selected: Option<TabId>,
     pub history: Vec<HistoryEntry>,
+    /// Texts of `history`, kept for completion ranking.
+    history_texts: Vec<String>,
     pub form: Option<ConnectionForm>,
     pub testing: bool,
     pub status: Option<Status>,
-    driver_kinds: Vec<DriverKind>,
+    dialects: Vec<(DriverKind, Dialect)>,
     next_tab: u64,
     outbox: Vec<Command>,
 }
 
 impl Presenter {
-    pub fn new(driver_kinds: Vec<DriverKind>) -> Self {
+    pub fn new(dialects: Vec<(DriverKind, Dialect)>) -> Self {
         Self {
             connections: Vec::new(),
             connecting: HashSet::new(),
@@ -71,17 +94,18 @@ impl Presenter {
             tabs: Vec::new(),
             selected: None,
             history: Vec::new(),
+            history_texts: Vec::new(),
             form: None,
             testing: false,
             status: None,
-            driver_kinds,
+            dialects,
             next_tab: 1,
             outbox: vec![Command::LoadConnections],
         }
     }
 
-    pub fn driver_kinds(&self) -> &[DriverKind] {
-        &self.driver_kinds
+    pub fn driver_kinds(&self) -> Vec<DriverKind> {
+        self.dialects.iter().map(|(k, _)| k.clone()).collect()
     }
 
     /// Commands produced since the last call.
@@ -92,7 +116,7 @@ impl Presenter {
     // --- connection manager -------------------------------------------------------------
 
     pub fn new_connection_form(&mut self) {
-        self.form = Some(ConnectionForm::new(self.driver_kinds.first()));
+        self.form = Some(ConnectionForm::new(self.dialects.first().map(|(k, _)| k)));
     }
 
     pub fn edit_connection(&mut self, id: ConnectionId) {
@@ -174,7 +198,9 @@ impl Presenter {
             session,
             title: format!("{name} #{number}"),
             text: String::new(),
+            executed: String::new(),
             state: TabState::Idle,
+            completion: CompletionState::default(),
         });
         self.select_tab(id);
         Some(id)
@@ -203,6 +229,7 @@ impl Presenter {
                 self.select_tab(next);
             } else {
                 self.history.clear();
+                self.history_texts.clear();
             }
         }
     }
@@ -226,6 +253,7 @@ impl Presenter {
             return;
         }
         tab.state = TabState::Running;
+        tab.executed = tab.text.clone();
         self.outbox.push(Command::Execute {
             tab: id,
             session: tab.session,
@@ -266,6 +294,116 @@ impl Presenter {
         if let Some(c) = self.selected.and_then(|id| self.tab_connection(id)) {
             self.outbox.push(Command::LoadHistory(c));
         }
+    }
+
+    // --- autocomplete ---------------------------------------------------------------------
+
+    /// Local completions for the tab's text at a byte offset. Empty until the schema is loaded.
+    /// Pure and synchronous, so the editor can call it on every keystroke.
+    pub fn suggestions(&self, id: TabId, cursor: usize) -> Vec<Suggestion> {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
+            return Vec::new();
+        };
+        let Some(open) = self.open.iter().find(|o| o.session == tab.session) else {
+            return Vec::new();
+        };
+        let Load::Ready(schema) = &open.schema else {
+            return Vec::new();
+        };
+        let recent: &[String] = if self.selected == Some(id) {
+            &self.history_texts
+        } else {
+            &[]
+        };
+        CompleteSql.execute(&CompletionRequest {
+            sql: &tab.text,
+            cursor,
+            schema,
+            dialect: &open.dialect,
+            recent_queries: recent,
+        })
+    }
+
+    /// The suggestions the popup should show right now (possibly none). Applies the display
+    /// rules: only while typing a name (or after `.`, or when requested with Ctrl+Space), not
+    /// after Esc, and not when the only candidate is exactly what is typed already.
+    pub fn popup(&mut self, id: TabId, cursor: usize) -> Vec<Suggestion> {
+        let suggestions = self.suggestions(id, cursor);
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else {
+            return Vec::new();
+        };
+        let anchor = (cursor, tab.text.len());
+        if tab.completion.selected_for != Some(anchor) {
+            tab.completion.selected = 0;
+            tab.completion.selected_for = Some(anchor);
+        }
+        let Some(first) = suggestions.first() else {
+            return Vec::new();
+        };
+        let typing = first.range.start < first.range.end
+            || tab
+                .text
+                .get(..cursor)
+                .is_some_and(|before| before.ends_with('.'));
+        let requested = tab.completion.requested == Some(anchor);
+        let exact =
+            suggestions.len() == 1 && tab.text.get(first.range.clone()) == Some(&first.text);
+        if tab.completion.dismissed == Some(anchor) || !(typing || requested) || exact {
+            return Vec::new();
+        }
+        tab.completion.selected = tab.completion.selected.min(suggestions.len() - 1);
+        suggestions
+    }
+
+    /// Moves the highlighted popup row, wrapping around.
+    pub fn move_selection(&mut self, id: TabId, delta: isize, len: usize) {
+        if len == 0 {
+            return;
+        }
+        if let Some(tab) = self.tab_mut(id) {
+            let current = tab.completion.selected.min(len - 1) as isize;
+            tab.completion.selected = (current + delta).rem_euclid(len as isize) as usize;
+        }
+    }
+
+    /// Esc: close the popup until the text or cursor changes.
+    pub fn dismiss_popup(&mut self, id: TabId, cursor: usize) {
+        if let Some(tab) = self.tab_mut(id) {
+            tab.completion.dismissed = Some((cursor, tab.text.len()));
+        }
+    }
+
+    /// Ctrl+Space: show the popup even though nothing has been typed yet.
+    pub fn request_popup(&mut self, id: TabId, cursor: usize) {
+        if let Some(tab) = self.tab_mut(id) {
+            tab.completion.dismissed = None;
+            tab.completion.requested = Some((cursor, tab.text.len()));
+        }
+    }
+
+    /// Applies a suggestion to the tab's text and returns the new cursor (byte offset).
+    pub fn accept_suggestion(&mut self, id: TabId, suggestion: &Suggestion) -> Option<usize> {
+        let tab = self.tab_mut(id)?;
+        let r = suggestion.range.clone();
+        let valid = r.start <= r.end
+            && r.end <= tab.text.len()
+            && tab.text.is_char_boundary(r.start)
+            && tab.text.is_char_boundary(r.end);
+        if !valid {
+            return None;
+        }
+        tab.text.replace_range(r.clone(), &suggestion.text);
+        tab.completion = CompletionState::default();
+        Some(r.start + suggestion.text.len())
+    }
+
+    /// The dialect of the connection a tab belongs to (for highlighting).
+    pub fn tab_dialect(&self, id: TabId) -> Dialect {
+        self.tabs
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| self.open.iter().find(|o| o.session == t.session))
+            .map_or(Dialect::ANSI, |o| o.dialect)
     }
 
     // --- events ---------------------------------------------------------------------------
@@ -310,7 +448,10 @@ impl Presenter {
                 let current = self.selected.and_then(|id| self.tab_connection(id));
                 if current == Some(connection) {
                     match result {
-                        Ok(entries) => self.history = entries,
+                        Ok(entries) => {
+                            self.history_texts = entries.iter().map(|e| e.text.clone()).collect();
+                            self.history = entries;
+                        }
                         Err(e) => self.error(format!("Could not load history: {e}")),
                     }
                 }
@@ -329,10 +470,17 @@ impl Presenter {
             .find(|p| p.id == connection)
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "connection".into());
+        let dialect = self
+            .connections
+            .iter()
+            .find(|p| p.id == connection)
+            .and_then(|p| self.dialects.iter().find(|(k, _)| *k == p.driver_kind))
+            .map_or(Dialect::ANSI, |(_, d)| *d);
         self.open.push(OpenConnection {
             session,
             connection,
             name: name.clone(),
+            dialect,
             schema: Load::Loading,
         });
         self.outbox.push(Command::LoadSchema(session));
@@ -359,10 +507,24 @@ impl Presenter {
 
     fn on_query_finished(&mut self, id: TabId, result: Result<QueryResult, String>) {
         let Some(tab) = self.tab_mut(id) else { return };
+        let session = tab.session;
+        let executed = tab.executed.clone();
+        let stale_schema = result.is_ok()
+            && self
+                .open
+                .iter()
+                .find(|o| o.session == session)
+                .is_some_and(|o| changes_schema(&executed, &o.dialect));
+        let Some(tab) = self.tab_mut(id) else { return };
         tab.state = match result {
             Ok(r) => TabState::Done(r),
             Err(e) => TabState::Failed(e),
         };
+        if stale_schema {
+            // The statement changed the schema, so the cached metadata (and with it the
+            // autocomplete data) is out of date.
+            self.refresh_schema(session);
+        }
         if let Some(connection) = self.tab_connection(id)
             && self.selected.and_then(|s| self.tab_connection(s)) == Some(connection)
         {
@@ -378,7 +540,7 @@ mod tests {
     use super::*;
 
     fn presenter() -> Presenter {
-        let mut p = Presenter::new(vec![DriverKind::new("postgres")]);
+        let mut p = Presenter::new(vec![(DriverKind::new("postgres"), Dialect::ANSI)]);
         assert!(matches!(
             p.take_commands().as_slice(),
             [Command::LoadConnections]
@@ -623,5 +785,226 @@ mod tests {
         p.handle(Event::TestFinished(Err("bad password".into())));
         assert!(!p.testing);
         assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("bad password")));
+    }
+
+    fn schema() -> SchemaTree {
+        use domain::{Catalog, Column, DataType, Schema, Table, TableKind};
+        let mut customers = Table::new("customers", TableKind::Table);
+        customers.columns.push(Column {
+            name: "email".into(),
+            data_type: DataType::new("text"),
+            nullable: true,
+            default: None,
+        });
+        SchemaTree {
+            catalogs: vec![Catalog {
+                name: "db".into(),
+                schemas: vec![Schema {
+                    name: "public".into(),
+                    tables: vec![customers],
+                }],
+            }],
+        }
+    }
+
+    fn with_schema() -> (Presenter, SessionId, TabId) {
+        let (mut p, _, session, tab) = connected();
+        p.handle(Event::Schema {
+            session,
+            result: Ok(schema()),
+        });
+        (p, session, tab)
+    }
+
+    #[test]
+    fn suggestions_need_the_schema_and_use_it_offline() {
+        let (mut p, _, session, tab) = connected();
+        p.tab_mut(tab).expect("tab").text = "SELECT * FROM cu".into();
+        assert!(p.suggestions(tab, 16).is_empty(), "schema still loading");
+
+        p.handle(Event::Schema {
+            session,
+            result: Ok(schema()),
+        });
+        let s = p.suggestions(tab, 16);
+        assert_eq!(
+            s.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+            ["customers"]
+        );
+        assert!(
+            p.take_commands().is_empty(),
+            "completion must not send commands"
+        );
+    }
+
+    #[test]
+    fn schema_failure_means_no_suggestions() {
+        let (mut p, _, session, tab) = connected();
+        p.handle(Event::Schema {
+            session,
+            result: Err("denied".into()),
+        });
+        p.tab_mut(tab).expect("tab").text = "SELECT * FROM ".into();
+        assert!(p.suggestions(tab, 14).is_empty());
+    }
+
+    #[test]
+    fn accepting_a_suggestion_replaces_the_prefix_and_returns_the_cursor() {
+        let (mut p, _, tab) = with_schema();
+        p.tab_mut(tab).expect("tab").text = "SELECT * FROM cu WHERE 1=1".into();
+        let s = p.suggestions(tab, 16).remove(0);
+        let cursor = p.accept_suggestion(tab, &s);
+        assert_eq!(
+            p.selected_tab().map(|t| t.text.as_str()),
+            Some("SELECT * FROM customers WHERE 1=1")
+        );
+        assert_eq!(cursor, Some("SELECT * FROM customers".len()));
+    }
+
+    #[test]
+    fn stale_suggestions_are_rejected_not_applied() {
+        let (mut p, _, tab) = with_schema();
+        p.tab_mut(tab).expect("tab").text = "é".into();
+        let bad = Suggestion {
+            range: 1..2, // inside the two-byte character
+            text: "x".into(),
+            kind: application::sql::SuggestionKind::Keyword,
+            source: application::sql::SuggestionSource::Local,
+            detail: None,
+        };
+        assert_eq!(p.accept_suggestion(tab, &bad), None);
+        assert_eq!(p.selected_tab().map(|t| t.text.as_str()), Some("é"));
+    }
+
+    #[test]
+    fn ddl_refreshes_the_schema_but_selects_do_not() {
+        let (mut p, session, tab) = with_schema();
+        for (sql, refreshes) in [("select 1", false), ("CREATE TABLE t (id int)", true)] {
+            p.tab_mut(tab).expect("tab").text = sql.into();
+            p.run(tab);
+            p.take_commands();
+            p.handle(Event::QueryFinished {
+                tab,
+                result: Ok(result(0)),
+            });
+            let cmds = p.take_commands();
+            let refreshed = cmds
+                .iter()
+                .any(|c| matches!(c, Command::LoadSchema(s) if *s == session));
+            assert_eq!(refreshed, refreshes, "{sql}");
+        }
+        assert!(
+            matches!(p.open[0].schema, Load::Loading),
+            "schema marked stale while reloading"
+        );
+    }
+
+    #[test]
+    fn failed_ddl_does_not_refresh() {
+        let (mut p, _, tab) = with_schema();
+        p.tab_mut(tab).expect("tab").text = "DROP TABLE nope".into();
+        p.run(tab);
+        p.take_commands();
+        p.handle(Event::QueryFinished {
+            tab,
+            result: Err("no such table".into()),
+        });
+        assert!(
+            !p.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::LoadSchema(_)))
+        );
+    }
+
+    #[test]
+    fn editing_while_a_ddl_runs_does_not_change_what_is_checked() {
+        let (mut p, _, tab) = with_schema();
+        p.tab_mut(tab).expect("tab").text = "DROP TABLE t".into();
+        p.run(tab);
+        p.take_commands();
+        p.tab_mut(tab).expect("tab").text = "select 1".into(); // edited after sending
+        p.handle(Event::QueryFinished {
+            tab,
+            result: Ok(result(0)),
+        });
+        assert!(
+            p.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::LoadSchema(_)))
+        );
+    }
+
+    #[test]
+    fn dialect_follows_the_connections_driver() {
+        let mut dialect = Dialect::ANSI;
+        dialect.name = "special";
+        let mut p = Presenter::new(vec![(DriverKind::new("postgres"), dialect)]);
+        let profile = profile();
+        let id = profile.id;
+        p.handle(Event::Connections(Ok(vec![profile])));
+        p.connect(id);
+        p.handle(Event::Connected {
+            connection: id,
+            result: Ok(SessionId(1)),
+        });
+        let tab = p.selected.expect("tab");
+        assert_eq!(p.tab_dialect(tab).name, "special");
+        assert_eq!(p.driver_kinds(), vec![DriverKind::new("postgres")]);
+    }
+
+    #[test]
+    fn popup_shows_while_typing_and_hides_after_escape_until_something_changes() {
+        let (mut p, _, tab) = with_schema();
+        p.tab_mut(tab).expect("tab").text = "SELECT * FROM cu".into();
+        assert_eq!(p.popup(tab, 16).len(), 1);
+        p.dismiss_popup(tab, 16);
+        assert!(p.popup(tab, 16).is_empty(), "dismissed");
+        assert!(p.popup(tab, 15).len() == 1, "moving the cursor reopens it");
+        p.tab_mut(tab).expect("tab").text = "SELECT * FROM cuz".into();
+        assert!(p.popup(tab, 17).is_empty(), "no table starts with cuz");
+    }
+
+    #[test]
+    fn popup_needs_a_typed_prefix_unless_requested() {
+        let (mut p, _, tab) = with_schema();
+        p.tab_mut(tab).expect("tab").text = "SELECT * FROM ".into();
+        assert!(p.popup(tab, 14).is_empty(), "nothing typed yet");
+        p.request_popup(tab, 14);
+        assert_eq!(p.popup(tab, 14).len(), 1, "Ctrl+Space shows it");
+        assert!(
+            p.popup(tab, 13).is_empty(),
+            "request only holds at its cursor"
+        );
+    }
+
+    #[test]
+    fn popup_opens_after_a_dot_and_hides_for_an_exact_single_match() {
+        let (mut p, _, tab) = with_schema();
+        p.tab_mut(tab).expect("tab").text = "SELECT customers. FROM customers".into();
+        assert_eq!(p.popup(tab, 17).len(), 1);
+        p.tab_mut(tab).expect("tab").text = "SELECT * FROM customers".into();
+        assert!(p.popup(tab, 23).is_empty(), "already fully typed");
+    }
+
+    #[test]
+    fn selection_wraps_resets_on_change_and_stays_in_range() {
+        let (mut p, _, tab) = with_schema();
+        p.tab_mut(tab).expect("tab").text = "SELECT  FROM customers".into();
+        p.request_popup(tab, 7);
+        let n = p.popup(tab, 7).len();
+        assert!(n >= 2, "columns and functions");
+        p.move_selection(tab, -1, n);
+        assert_eq!(p.selected_tab().map(|t| t.completion.selected), Some(n - 1));
+        p.move_selection(tab, 1, n);
+        assert_eq!(p.selected_tab().map(|t| t.completion.selected), Some(0));
+        p.move_selection(tab, 1, n);
+        p.tab_mut(tab).expect("tab").text.push(' ');
+        p.popup(tab, 7);
+        assert_eq!(
+            p.selected_tab().map(|t| t.completion.selected),
+            Some(0),
+            "reset on change"
+        );
+        p.move_selection(tab, 1, 0); // empty list: no panic
     }
 }

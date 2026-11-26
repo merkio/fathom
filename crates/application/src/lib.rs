@@ -3,4 +3,5 @@
 pub mod error;
 pub mod ports;
 pub mod registry;
+pub mod sql;
 pub mod usecases;

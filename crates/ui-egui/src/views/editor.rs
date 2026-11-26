@@ -34,21 +34,11 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
         .min_size(120.0)
         .show(ui, |ui| super::results::show(ui, p));
 
-    if let Some(tab) = p.tab_mut(id) {
-        egui::ScrollArea::vertical()
-            .id_salt(("editor", id.0))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_sized(
-                    ui.available_size(),
-                    egui::TextEdit::multiline(&mut tab.text)
-                        .id_salt(("editor_text", id.0))
-                        .code_editor()
-                        .hint_text("SELECT ...")
-                        .desired_width(f32::INFINITY),
-                );
-            });
-    }
+    let height = ui.available_height();
+    egui::ScrollArea::vertical()
+        .id_salt(("editor", id.0))
+        .auto_shrink([false, false])
+        .show(ui, |ui| super::code_editor::show(ui, p, id, height));
 
     if run {
         p.run(id);

@@ -15,6 +15,9 @@ pub enum LimitStyle {
 pub struct Dialect {
     pub name: &'static str,
     pub identifier_quote: char,
+    /// Identifiers containing uppercase letters must be quoted to keep their case (PostgreSQL
+    /// folds unquoted names to lowercase; MySQL does not).
+    pub quote_mixed_case: bool,
     pub limit_style: LimitStyle,
     pub keywords: &'static [&'static str],
     pub functions: &'static [&'static str],
@@ -32,6 +35,7 @@ impl Dialect {
     pub const ANSI: Dialect = Dialect {
         name: "ansi",
         identifier_quote: '"',
+        quote_mixed_case: true,
         limit_style: LimitStyle::FetchFirst,
         keywords: &[
             "SELECT", "FROM", "WHERE", "JOIN", "ON", "GROUP", "ORDER", "BY",

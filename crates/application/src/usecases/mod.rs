@@ -1,9 +1,11 @@
 //! Use cases. Each is a small struct holding the ports it needs.
 
+pub mod autocomplete;
 pub mod bundle;
 pub mod connections;
 pub mod data;
 
+pub use autocomplete::CompleteSql;
 pub use bundle::{Ports, UseCases};
 pub use connections::{
     CloseSession, DeleteConnection, ListConnections, OpenSession, SaveConnection, TestConnection,
