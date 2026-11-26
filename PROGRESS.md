@@ -2,7 +2,7 @@
 
 - [x] M0. Workspace skeleton and guardrails
 - [x] M1. Domain and ports
-- [ ] M2. Connection management
+- [x] M2. Connection management
 - [ ] M3. PostgreSQL adapter
 - [ ] M4. MySQL/MariaDB adapter
 - [ ] M5. egui shell and data browsing
