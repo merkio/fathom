@@ -11,11 +11,16 @@ use domain::{QueryLanguage, QueryRequest, Value};
 async fn connect() -> Box<dyn DbSession> {
     let s = common::server().await;
     let (profile, password) = common::profile_for(&s);
-    MySqlDriver::new().connect(&profile, Some(password)).await.expect("connect")
+    MySqlDriver::new()
+        .connect(&profile, Some(password))
+        .await
+        .expect("connect")
 }
 
 async fn exec(s: &dyn DbSession, sql: &str) -> domain::QueryResult {
-    s.execute(QueryRequest::sql(sql)).await.unwrap_or_else(|e| panic!("{sql}: {e:?}"))
+    s.execute(QueryRequest::sql(sql))
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e:?}"))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -42,7 +47,11 @@ async fn maps_mysql_types_to_domain_values() {
     .await;
     exec(s.as_ref(), "INSERT INTO value_types (ti) VALUES (NULL)").await;
 
-    let r = exec(s.as_ref(), "SELECT * FROM value_types ORDER BY ti IS NULL, ti LIMIT 1").await;
+    let r = exec(
+        s.as_ref(),
+        "SELECT * FROM value_types ORDER BY ti IS NULL, ti LIMIT 1",
+    )
+    .await;
     let row = &r.rows[0];
     let by_name = |n: &str| {
         let i = r.columns.iter().position(|c| c.name == n).expect("column");
@@ -52,19 +61,37 @@ async fn maps_mysql_types_to_domain_values() {
     assert_eq!(by_name("si"), Value::Int(300));
     assert_eq!(by_name("i"), Value::Int(-70000));
     assert_eq!(by_name("bi"), Value::Int(-9_000_000_000));
-    assert_eq!(by_name("ubi"), Value::Decimal("18446744073709551615".into()), "beyond i64 keeps every digit");
+    assert_eq!(
+        by_name("ubi"),
+        Value::Decimal("18446744073709551615".into()),
+        "beyond i64 keeps every digit"
+    );
     assert_eq!(by_name("f"), Value::Float(1.5));
     assert_eq!(by_name("d"), Value::Float(2.25));
-    assert_eq!(by_name("price"), Value::Decimal("1.50".into()), "declared scale is kept");
-    assert_eq!(by_name("big"), Value::Decimal("12345678901234567890.1234567890".into()));
+    assert_eq!(
+        by_name("price"),
+        Value::Decimal("1.50".into()),
+        "declared scale is kept"
+    );
+    assert_eq!(
+        by_name("big"),
+        Value::Decimal("12345678901234567890.1234567890".into())
+    );
     assert_eq!(by_name("s"), Value::Text("héllo".into()));
     assert_eq!(by_name("t"), Value::Text("some text".into()));
     assert_eq!(by_name("raw"), Value::Bytes(vec![0xde, 0xad]));
     assert_eq!(by_name("bl"), Value::Bytes(vec![0xbe, 0xef]));
     assert_eq!(by_name("dt"), Value::Temporal("2024-02-29".into()));
-    assert_eq!(by_name("dts"), Value::Temporal("2024-02-29 13:14:15".into()));
+    assert_eq!(
+        by_name("dts"),
+        Value::Temporal("2024-02-29 13:14:15".into())
+    );
     assert_eq!(by_name("y"), Value::Int(2024));
-    assert_eq!(by_name("tm"), Value::Temporal("-838:59:59".into()), "TIME beyond 24h and negative");
+    assert_eq!(
+        by_name("tm"),
+        Value::Temporal("-838:59:59".into()),
+        "TIME beyond 24h and negative"
+    );
 
     // NULLs in every column of the second row.
     let nulls = exec(s.as_ref(), "SELECT * FROM value_types WHERE ti IS NULL").await;
@@ -78,7 +105,7 @@ async fn json_and_timestamps_are_mapped() {
     let s = connect().await;
     let r = exec(
         s.as_ref(),
-        "SELECT CAST('{\"a\": 1}' AS JSON) AS j, CAST('2024-02-29 13:14:15' AS DATETIME) AS d",
+        "SELECT JSON_OBJECT('a', 1) AS j, CAST('2024-02-29 13:14:15' AS DATETIME) AS d",
     )
     .await;
     // MySQL has a JSON type; MariaDB aliases it to LONGTEXT. Both must read back the same text.
@@ -94,12 +121,18 @@ async fn rejects_non_sql_languages() {
     let s = connect().await;
     let mut req = QueryRequest::sql("db.users.find()");
     req.language = QueryLanguage::Mql;
-    assert!(matches!(s.execute(req).await.err(), Some(DbError::Unsupported(_))));
+    assert!(matches!(
+        s.execute(req).await.err(),
+        Some(DbError::Unsupported(_))
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cancel_while_idle_does_not_disturb_the_next_statement() {
     let s = connect().await;
     s.cancel().await.expect("cancel while idle");
-    assert_eq!(exec(s.as_ref(), "SELECT 1 + 1").await.rows, vec![vec![Value::Int(2)]]);
+    assert_eq!(
+        exec(s.as_ref(), "SELECT 1 + 1").await.rows,
+        vec![vec![Value::Int(2)]]
+    );
 }

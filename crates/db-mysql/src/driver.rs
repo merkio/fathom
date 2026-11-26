@@ -35,19 +35,33 @@ fn ssl_mode(profile: &ConnectionProfile) -> Result<MySqlSslMode, DbError> {
 }
 
 /// A path option that must point at an existing file; absent or blank means "not set".
-fn file_option(profile: &ConnectionProfile, key: &str, what: &str) -> Result<Option<PathBuf>, DbError> {
-    let Some(value) = profile.options.get(key).map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+fn file_option(
+    profile: &ConnectionProfile,
+    key: &str,
+    what: &str,
+) -> Result<Option<PathBuf>, DbError> {
+    let Some(value) = profile
+        .options
+        .get(key)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    else {
         return Ok(None);
     };
     let path = PathBuf::from(value);
     if path.is_file() {
         Ok(Some(path))
     } else {
-        Err(DbError::Connection(format!("The {what} file was not found: {value}")))
+        Err(DbError::Connection(format!(
+            "The {what} file was not found: {value}"
+        )))
     }
 }
 
-fn options(profile: &ConnectionProfile, secret: Option<&SecretString>) -> Result<MySqlConnectOptions, DbError> {
+fn options(
+    profile: &ConnectionProfile,
+    secret: Option<&SecretString>,
+) -> Result<MySqlConnectOptions, DbError> {
     let mut opts = MySqlConnectOptions::new()
         .host(&profile.host)
         .port(profile.port.unwrap_or(3306))
@@ -117,19 +131,40 @@ mod tests {
 
     #[test]
     fn sslmode_defaults_to_prefer_and_maps_the_shared_names() {
-        assert!(matches!(ssl_mode(&profile(&[])), Ok(MySqlSslMode::Preferred)));
-        assert!(matches!(ssl_mode(&profile(&[("sslmode", "disable")])), Ok(MySqlSslMode::Disabled)));
-        assert!(matches!(ssl_mode(&profile(&[("sslmode", "require")])), Ok(MySqlSslMode::Required)));
-        assert!(matches!(ssl_mode(&profile(&[("sslmode", "verify-ca")])), Ok(MySqlSslMode::VerifyCa)));
-        assert!(matches!(ssl_mode(&profile(&[("sslmode", "verify-full")])), Ok(MySqlSslMode::VerifyIdentity)));
-        assert!(matches!(ssl_mode(&profile(&[("sslmode", "bogus")])), Err(DbError::Unsupported(_))));
+        assert!(matches!(
+            ssl_mode(&profile(&[])),
+            Ok(MySqlSslMode::Preferred)
+        ));
+        assert!(matches!(
+            ssl_mode(&profile(&[("sslmode", "disable")])),
+            Ok(MySqlSslMode::Disabled)
+        ));
+        assert!(matches!(
+            ssl_mode(&profile(&[("sslmode", "require")])),
+            Ok(MySqlSslMode::Required)
+        ));
+        assert!(matches!(
+            ssl_mode(&profile(&[("sslmode", "verify-ca")])),
+            Ok(MySqlSslMode::VerifyCa)
+        ));
+        assert!(matches!(
+            ssl_mode(&profile(&[("sslmode", "verify-full")])),
+            Ok(MySqlSslMode::VerifyIdentity)
+        ));
+        assert!(matches!(
+            ssl_mode(&profile(&[("sslmode", "bogus")])),
+            Err(DbError::Unsupported(_))
+        ));
     }
 
     #[test]
     fn tls_file_options_must_point_at_existing_files() {
         for key in ["sslrootcert", "sslcert", "sslkey"] {
             let err = options(&profile(&[(key, "/definitely/not/here.pem")]), None).err();
-            assert!(matches!(&err, Some(DbError::Connection(m)) if m.contains("not found")), "{key}: {err:?}");
+            assert!(
+                matches!(&err, Some(DbError::Connection(m)) if m.contains("not found")),
+                "{key}: {err:?}"
+            );
         }
         assert!(options(&profile(&[("sslrootcert", "  ")]), None).is_ok());
     }

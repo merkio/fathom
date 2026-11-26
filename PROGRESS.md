@@ -4,10 +4,10 @@
 - [x] M1. Domain and ports
 - [x] M2. Connection management
 - [x] M3. PostgreSQL adapter
-- [ ] M4. MySQL/MariaDB adapter
+- [x] M4. (contract suite green against a real MariaDB 10.11; MySQL 8 runs only in the CI job, not verified locally) MySQL/MariaDB adapter
 - [x] M5. (smoke-tested against PostgreSQL only; MySQL half waits for M4) egui shell and data browsing
 - [x] M5b. (smoke-tested against PostgreSQL; MySQL dialect covered by table-driven tests with a backtick dialect) Schema-aware autocomplete
 - [x] M6. (adapters verified against mock servers only; no real provider was called) LLM core and adapters
 - [x] M7. (UI smoke-tested against a protocol-faithful fake Ollama server; no real Ollama or cloud provider was available) AI features in the UI
 - [x] M7b. (smoke-tested against a protocol-faithful fake Ollama server) LLM inline suggestions
-- [ ] M8. Hardening (8a export, error hints, redacting logs: done; 8b TLS options and the SQLite extensibility proof: done; SSH tunnel not done, awaiting a decision; 8c packaging: pending)
+- [x] M8. Hardening (export, error hints, redacting logs, TLS options, SQLite extensibility proof, release workflow and README; SSH tunnel NOT done, awaiting a decision; macOS/Windows builds untested)

@@ -108,6 +108,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut drivers = DriverRegistry::new();
     drivers.register(Arc::new(db_postgres::PostgresDriver::new()));
+    drivers.register(Arc::new(db_mysql::MySqlDriver::new()));
     drivers.register(Arc::new(db_sqlite::SqliteDriver::new()));
 
     let secrets = secret_store();

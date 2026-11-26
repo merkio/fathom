@@ -29,7 +29,10 @@ pub(crate) struct MySqlSession {
 }
 
 impl MySqlSession {
-    pub(crate) async fn new(mut conn: MySqlConnection, control: MySqlConnection) -> Result<Self, DbError> {
+    pub(crate) async fn new(
+        mut conn: MySqlConnection,
+        control: MySqlConnection,
+    ) -> Result<Self, DbError> {
         let id: u64 = sqlx::query("SELECT CONNECTION_ID()")
             .fetch_one(&mut conn)
             .await

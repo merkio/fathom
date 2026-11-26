@@ -11,7 +11,10 @@ const MAX_STATEMENT_TIME_EXCEEDED: u16 = 1969; // MariaDB `max_statement_time`
 /// the password.
 pub(crate) fn map_error(e: sqlx::Error) -> DbError {
     match &e {
-        sqlx::Error::Database(db) => match db.try_downcast_ref::<MySqlDatabaseError>().map(MySqlDatabaseError::number) {
+        sqlx::Error::Database(db) => match db
+            .try_downcast_ref::<MySqlDatabaseError>()
+            .map(MySqlDatabaseError::number)
+        {
             Some(ACCESS_DENIED) => DbError::Authentication,
             Some(QUERY_INTERRUPTED) => DbError::Cancelled,
             Some(MAX_EXECUTION_TIME_EXCEEDED | MAX_STATEMENT_TIME_EXCEEDED) => DbError::Timeout,

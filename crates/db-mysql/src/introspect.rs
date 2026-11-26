@@ -6,9 +6,7 @@
 use std::collections::BTreeMap;
 
 use application::ports::{DbError, IntrospectScope};
-use domain::{
-    Catalog, Column, DataType, ForeignKey, Index, Schema, SchemaTree, Table, TableKind,
-};
+use domain::{Catalog, Column, DataType, ForeignKey, Index, Schema, SchemaTree, Table, TableKind};
 use sqlx::mysql::MySqlConnection;
 use sqlx::{AssertSqlSafe, Row};
 
@@ -24,15 +22,20 @@ fn schema_filter(column: &str) -> String {
     format!("{column} NOT IN {SYSTEM_SCHEMAS} AND (? IS NULL OR {column} = ?)")
 }
 
-fn s<'r>(r: &'r sqlx::mysql::MySqlRow, i: usize) -> Result<String, DbError> {
-    r.try_get::<Option<String>, _>(i).map(Option::unwrap_or_default).map_err(map_error)
+fn s(r: &sqlx::mysql::MySqlRow, i: usize) -> Result<String, DbError> {
+    r.try_get::<Option<String>, _>(i)
+        .map(Option::unwrap_or_default)
+        .map_err(map_error)
 }
 
 fn opt(r: &sqlx::mysql::MySqlRow, i: usize) -> Result<Option<String>, DbError> {
     r.try_get::<Option<String>, _>(i).map_err(map_error)
 }
 
-pub(crate) async fn load(conn: &mut MySqlConnection, scope: &IntrospectScope) -> Result<SchemaTree, DbError> {
+pub(crate) async fn load(
+    conn: &mut MySqlConnection,
+    scope: &IntrospectScope,
+) -> Result<SchemaTree, DbError> {
     let filter: Option<&str> = match scope {
         IntrospectScope::All => None,
         IntrospectScope::Schema(name) => Some(name.as_str()),
@@ -52,7 +55,11 @@ pub(crate) async fn load(conn: &mut MySqlConnection, scope: &IntrospectScope) ->
     .map_err(map_error)?;
     for r in rows {
         let (schema, name, kind) = (s(&r, 0)?, s(&r, 1)?, s(&r, 2)?);
-        let kind = if kind.contains("VIEW") { TableKind::View } else { TableKind::Table };
+        let kind = if kind.contains("VIEW") {
+            TableKind::View
+        } else {
+            TableKind::Table
+        };
         tables.insert((schema, name.clone()), Table::new(name, kind));
     }
 
@@ -95,14 +102,20 @@ pub(crate) async fn load(conn: &mut MySqlConnection, scope: &IntrospectScope) ->
     .await
     .map_err(map_error)?;
     for r in rows {
-        let Some(table) = tables.get_mut(&(s(&r, 0)?, s(&r, 1)?)) else { continue };
+        let Some(table) = tables.get_mut(&(s(&r, 0)?, s(&r, 1)?)) else {
+            continue;
+        };
         let (constraint, column) = (s(&r, 2)?, s(&r, 3)?);
         if constraint == "PRIMARY" {
             table.primary_key.push(column);
             continue;
         }
         let (ref_schema, ref_table, ref_column) = (opt(&r, 4)?, s(&r, 5)?, s(&r, 6)?);
-        match table.foreign_keys.iter_mut().find(|fk| fk.name == constraint) {
+        match table
+            .foreign_keys
+            .iter_mut()
+            .find(|fk| fk.name == constraint)
+        {
             Some(fk) => {
                 fk.columns.push(column);
                 fk.referenced_columns.push(ref_column);
@@ -132,14 +145,20 @@ pub(crate) async fn load(conn: &mut MySqlConnection, scope: &IntrospectScope) ->
     .await
     .map_err(map_error)?;
     for r in rows {
-        let Some(table) = tables.get_mut(&(s(&r, 0)?, s(&r, 1)?)) else { continue };
+        let Some(table) = tables.get_mut(&(s(&r, 0)?, s(&r, 1)?)) else {
+            continue;
+        };
         let (name, column) = (s(&r, 2)?, opt(&r, 3)?);
         let non_unique: i64 = r.try_get(4).map_err(map_error)?;
         // Functional (expression) indexes have no column name; they are skipped.
         let Some(column) = column else { continue };
         match table.indexes.iter_mut().find(|i| i.name == name) {
             Some(index) => index.columns.push(column),
-            None => table.indexes.push(Index { name, columns: vec![column], unique: non_unique == 0 }),
+            None => table.indexes.push(Index {
+                name,
+                columns: vec![column],
+                unique: non_unique == 0,
+            }),
         }
     }
 
@@ -150,7 +169,10 @@ pub(crate) async fn load(conn: &mut MySqlConnection, scope: &IntrospectScope) ->
     Ok(SchemaTree {
         catalogs: vec![Catalog {
             name: "def".into(),
-            schemas: schemas.into_iter().map(|(name, tables)| Schema { name, tables }).collect(),
+            schemas: schemas
+                .into_iter()
+                .map(|(name, tables)| Schema { name, tables })
+                .collect(),
         }],
     })
 }

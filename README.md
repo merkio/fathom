@@ -1,8 +1,7 @@
 # DBiever
 
 A desktop database client written in Rust ([egui](https://github.com/emilk/egui)), with
-optional LLM assistance. It connects to PostgreSQL and SQLite today; MySQL/MariaDB is planned (see
-`PLAN.md`). New databases and LLM providers plug in as separate crates.
+optional LLM assistance. It connects to PostgreSQL, MySQL/MariaDB and SQLite. New databases and LLM providers plug in as separate crates.
 
 > **Status:** under development. See `PROGRESS.md` for which milestones are done and what has
 > been verified (and against what).
@@ -68,6 +67,7 @@ Set in the connection dialog's **Advanced** box, one `key=value` per line.
 | PostgreSQL | `sslmode` | `disable`, `allow`, `prefer` (default), `require`, `verify-ca`, `verify-full` |
 | PostgreSQL | `sslrootcert` | CA certificate file used to verify the server (needed for private CAs) |
 | PostgreSQL | `sslcert`, `sslkey` | Client certificate and key (mutual TLS) |
+| MySQL / MariaDB | `sslmode`, `sslrootcert`, `sslcert`, `sslkey` | Same meaning as for PostgreSQL (`verify-full` verifies the host name) |
 | SQLite | `mode=ro` | Open the file read-only |
 | SQLite | `create=true` | Create the file if it does not exist (off: a typo is an error) |
 
@@ -91,6 +91,9 @@ DBIEVER_TEST_PG_HOST=127.0.0.1 DBIEVER_TEST_PG_PASSWORD=... \
 cargo test -p db-postgres --features containers
 ```
 
+MySQL/MariaDB: set `DBIEVER_TEST_MYSQL_HOST` (and `_PORT`, `_USER`, `_PASSWORD`, `_DB`) and run
+`cargo test -p db-mysql --features integration`.
+
 TLS tests additionally need `DBIEVER_TEST_PG_TLS_CA` and `DBIEVER_TEST_PG_TLS_OTHER_CA` (paths to a
 CA that signed the server certificate, and to an unrelated CA); without them they skip.
 
@@ -102,7 +105,7 @@ Clean Architecture in a Cargo workspace; dependencies point inward and a test en
 ```
 domain        entities, value objects (no I/O)
 application   use cases and ports (traits), prompt building, SQL helpers
-db-*          database adapters (postgres, sqlite)   -> implement DatabaseDriver
+db-*          database adapters (postgres, mysql/mariadb, sqlite)   -> implement DatabaseDriver
 llm-*         LLM adapters (anthropic, openai, ollama) -> implement LlmProvider
 storage       SQLite repositories, OS keychain
 ui-egui       presentation: presenters, views, command/event bridge
