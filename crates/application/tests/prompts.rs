@@ -198,3 +198,15 @@ fn empty_schema() {
     };
     insta::assert_snapshot!(render(&PromptBuilder.chat(&ctx, &[], "hello")));
 }
+
+#[test]
+fn inline_sql() {
+    let p = with_ctx(None, |c| {
+        PromptBuilder.inline_sql(
+            c,
+            "SELECT c.name FROM customers c JOIN ",
+            " ON c.id = o.customer_id",
+        )
+    });
+    insta::assert_snapshot!(render(&p));
+}

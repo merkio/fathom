@@ -19,6 +19,8 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
             ask_form(ui, p);
             ui.separator();
             reply(ui, p);
+            ui.separator();
+            inline_settings(ui, p);
         });
     preview_window(ui.ctx(), p);
 }
@@ -367,4 +369,86 @@ fn preview_window(ctx: &egui::Context, p: &mut Presenter) {
     if !open {
         p.ai.preview = None;
     }
+}
+
+/// Inline (ghost text) suggestions. Off by default; turning them on sends typing context to the
+/// chosen provider, so the warning is shown right where the switch is.
+fn inline_settings(ui: &mut egui::Ui, p: &mut Presenter) {
+    egui::CollapsingHeader::new("Inline suggestions").default_open(false).show(ui, |ui| {
+        let mut enabled = p.inline.settings.enabled;
+        if ui.checkbox(&mut enabled, "Suggest completions as I type (off by default)").changed() {
+            p.inline_set_enabled(enabled);
+        }
+        let provider_name = p
+            .inline
+            .settings
+            .provider
+            .as_ref()
+            .map_or("the selected provider".to_owned(), |id| id.as_str().to_owned());
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "While this is on, after each pause in typing the text around your cursor and \
+                 your schema (names and types, never row data) are sent to {provider_name}. \
+                 With a local Ollama model they stay on this machine. A small, fast model works best."
+            ),
+        );
+        ui.weak("Tab accepts a suggestion. Each connection can override this in its settings.");
+
+        let providers: Vec<_> = p.ai.providers.iter().map(|s| s.id.clone()).collect();
+        let mut chosen_provider = None;
+        let mut chosen_model = None;
+        ui.horizontal_wrapped(|ui| {
+            let current = p.inline.settings.provider.as_ref().map_or("provider", |id| id.as_str());
+            egui::ComboBox::from_id_salt("inline_provider").selected_text(current).show_ui(ui, |ui| {
+                for id in &providers {
+                    let selected = p.inline.settings.provider.as_ref() == Some(id);
+                    if ui.selectable_label(selected, id.as_str()).clicked() {
+                        chosen_provider = Some(id.clone());
+                    }
+                }
+            });
+            let model = p.inline.settings.model.as_ref().map_or("model", |m| m.as_str());
+            egui::ComboBox::from_id_salt("inline_model").selected_text(model).show_ui(ui, |ui| {
+                let models = p
+                    .inline
+                    .settings
+                    .provider
+                    .as_ref()
+                    .and_then(|id| p.ai.provider(id))
+                    .map(|s| &s.models);
+                match models {
+                    Some(ModelsState::Ready(models)) => {
+                        for m in models {
+                            let selected = p.inline.settings.model.as_ref() == Some(&m.id);
+                            if ui.selectable_label(selected, &m.display_name).clicked() {
+                                chosen_model = Some(m.id.clone());
+                            }
+                        }
+                    }
+                    Some(ModelsState::Failed(e)) => {
+                        ui.colored_label(ui.visuals().error_fg_color, e);
+                    }
+                    Some(ModelsState::Loading) => {
+                        ui.spinner();
+                    }
+                    _ => {
+                        ui.weak("Pick a provider first");
+                    }
+                }
+            });
+        });
+        if let Some(id) = chosen_provider {
+            p.inline_select_provider(id);
+        }
+        if let Some(id) = chosen_model {
+            p.inline_select_model(id);
+        }
+        if p.inline.settings.enabled && (p.inline.settings.provider.is_none() || p.inline.settings.model.is_none()) {
+            ui.colored_label(ui.visuals().warn_fg_color, "Choose a provider and model for it to work.");
+        }
+        if let Some(error) = &p.inline.error {
+            ui.colored_label(ui.visuals().error_fg_color, format!("Last inline request failed: {error}"));
+        }
+    });
 }

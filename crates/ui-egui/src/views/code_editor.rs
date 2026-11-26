@@ -10,6 +10,7 @@ use eframe::egui::{
     text::{CCursor, CCursorRange, LayoutJob},
     text_edit::TextEditState,
 };
+use std::time::Instant;
 
 use crate::bridge::TabId;
 use crate::presenter::Presenter;
@@ -90,6 +91,7 @@ fn kind_tag(kind: SuggestionKind) -> &'static str {
         SuggestionKind::View => "view",
         SuggestionKind::Column => "col",
         SuggestionKind::Join => "join",
+        SuggestionKind::Inline => "ai",
     }
 }
 
@@ -145,6 +147,13 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter, tab: TabId, height: f32) {
                         set_cursor(&ctx, edit_id, &text.unwrap_or_default(), new_cursor);
                     }
                 }
+            } else if p.inline_ghost(tab, cursor).is_some()
+                && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab))
+                && let Some(new_cursor) = p.inline_accept(tab, cursor)
+            {
+                // LLM ghost text: Tab inserts it. Local completions take priority (above).
+                let text = p.tabs.iter().find(|t| t.id == tab).map(|t| t.text.clone());
+                set_cursor(&ctx, edit_id, &text.unwrap_or_default(), new_cursor);
             }
         }
     }
@@ -168,13 +177,16 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter, tab: TabId, height: f32) {
         .layouter(&mut layouter)
         .show(ui);
 
-    // 3. The popup, from the state after this frame's edits.
-    let Some(range) = output.cursor_range else {
-        return;
+    // 3. Inline ghost text and the popup, from the state after this frame's edits.
+    let now = Instant::now();
+    let range = match output.cursor_range {
+        Some(range) if output.response.has_focus() => range,
+        _ => {
+            // Not editing: stop any inline request and hide ghost text.
+            p.inline_tick(now, tab, 0, false, false);
+            return;
+        }
     };
-    if !output.response.has_focus() {
-        return;
-    }
     let text = p
         .tabs
         .iter()
@@ -183,7 +195,12 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter, tab: TabId, height: f32) {
         .unwrap_or_default();
     let cursor = char_to_byte(&text, range.primary.index.0);
     let shown = p.popup(tab, cursor);
+    if let Some(wake) = p.inline_tick(now, tab, cursor, true, !shown.is_empty()) {
+        // egui only repaints on events; ask for a frame when the debounce timer is due.
+        ctx.request_repaint_after(wake);
+    }
     if shown.is_empty() {
+        draw_ghost(ui, p, tab, cursor, &output, range);
         return;
     }
     let selected = p.selected_tab().map_or(0, |t| t.completion.selected);
@@ -238,4 +255,29 @@ fn row(ui: &mut egui::Ui, s: &Suggestion, selected: bool) -> egui::Response {
         response = response.on_hover_text(detail);
     }
     response
+}
+
+/// LLM ghost text, drawn in a muted colour right after the cursor (a warning colour when the
+/// statement it would complete is not a plain read). It is not part of the text until accepted.
+fn draw_ghost(
+    ui: &egui::Ui,
+    p: &Presenter,
+    tab: TabId,
+    cursor: usize,
+    output: &egui::text_edit::TextEditOutput,
+    range: CCursorRange,
+) {
+    let Some(ghost) = p.inline_ghost(tab, cursor) else {
+        return;
+    };
+    let pos = output.galley.pos_from_cursor(range.primary).left_top() + output.galley_pos.to_vec2();
+    let color = match ghost.safety {
+        Some(application::llm::StatementKind::Read) | None => ui.visuals().weak_text_color(),
+        Some(_) => ui.visuals().warn_fg_color,
+    };
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout(ghost.text.clone(), font, color, f32::INFINITY);
+    ui.painter().galley(pos, galley, color);
 }

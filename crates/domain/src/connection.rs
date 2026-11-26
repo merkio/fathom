@@ -58,6 +58,8 @@ impl SecretRef {
 
 /// Option key for per-connection read-only mode.
 const READ_ONLY_OPTION: &str = "read_only";
+/// Option key for the per-connection inline-suggestion override.
+const INLINE_AI_OPTION: &str = "inline_ai";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionProfile {
@@ -103,6 +105,28 @@ impl ConnectionProfile {
         } else {
             self.options.remove(READ_ONLY_OPTION);
         }
+    }
+
+    /// Per-connection override of LLM inline suggestions: `Some(true)` forces them on,
+    /// `Some(false)` forces them off, `None` follows the global setting.
+    pub fn inline_ai(&self) -> Option<bool> {
+        match self.options.get(INLINE_AI_OPTION).map(String::as_str) {
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            _ => None,
+        }
+    }
+
+    pub fn set_inline_ai(&mut self, value: Option<bool>) {
+        match value {
+            Some(true) => self
+                .options
+                .insert(INLINE_AI_OPTION.to_owned(), "on".to_owned()),
+            Some(false) => self
+                .options
+                .insert(INLINE_AI_OPTION.to_owned(), "off".to_owned()),
+            None => self.options.remove(INLINE_AI_OPTION),
+        };
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -175,6 +199,25 @@ mod tests {
         assert_eq!(p.options.get("read_only").map(String::as_str), Some("true"));
         p.set_read_only(false);
         assert!(!p.read_only() && p.options.is_empty());
+    }
+
+    #[test]
+    fn inline_ai_override_round_trips_and_defaults_to_inherit() {
+        let mut p = profile();
+        assert_eq!(p.inline_ai(), None);
+        p.set_inline_ai(Some(true));
+        assert_eq!(p.inline_ai(), Some(true));
+        p.set_inline_ai(Some(false));
+        assert_eq!(p.inline_ai(), Some(false));
+        p.set_inline_ai(None);
+        assert_eq!(p.inline_ai(), None);
+        assert!(p.options.is_empty());
+        p.options.insert("inline_ai".into(), "garbage".into());
+        assert_eq!(
+            p.inline_ai(),
+            None,
+            "unknown values inherit the global setting"
+        );
     }
 
     #[test]

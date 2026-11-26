@@ -2,10 +2,11 @@
 //! the methods; the app drains `take_commands` into the backend and feeds events to `handle`.
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use application::ports::HistoryEntry;
 use application::sql::{CompletionRequest, Suggestion, changes_schema};
-use application::usecases::{AiSettings, CompleteSql};
+use application::usecases::{AiSettings, CompleteSql, InlineSettings};
 use domain::{
     ConnectionId, ConnectionProfile, Dialect, DriverKind, ModelId, ProviderId, QueryResult,
     SchemaTree,
@@ -14,6 +15,7 @@ use domain::{
 use crate::ai::{AiMode, AiRun, AiRunState, AiState, Followup};
 use crate::bridge::{AiAsk, AiTask, Command, Event, SessionId, TabId};
 use crate::form::ConnectionForm;
+use crate::inline::{Ghost, InlineState, Snapshot};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -96,6 +98,7 @@ pub struct Presenter {
     pub status: Option<Status>,
     pub right_panel: RightPanel,
     pub ai: AiState,
+    pub inline: InlineState,
     dialects: Vec<(DriverKind, Dialect)>,
     next_tab: u64,
     outbox: Vec<Command>,
@@ -106,7 +109,11 @@ impl Presenter {
         dialects: Vec<(DriverKind, Dialect)>,
         llm_providers: Vec<(ProviderId, bool)>,
     ) -> Self {
-        let mut outbox = vec![Command::LoadConnections, Command::LoadAiSettings];
+        let mut outbox = vec![
+            Command::LoadConnections,
+            Command::LoadAiSettings,
+            Command::LoadInlineSettings,
+        ];
         outbox.extend(
             llm_providers
                 .iter()
@@ -126,6 +133,7 @@ impl Presenter {
             status: None,
             right_panel: RightPanel::History,
             ai: AiState::new(llm_providers),
+            inline: InlineState::new(),
             dialects,
             next_tab: 1,
             outbox,
@@ -551,6 +559,112 @@ impl Presenter {
         &self.ai.settings
     }
 
+    // --- LLM inline suggestions ---------------------------------------------------------------
+
+    /// Whether inline suggestions are on for this connection: its own override if it has one,
+    /// else the global switch, and only with a provider and model chosen. (The use case checks
+    /// again before anything is sent.)
+    pub fn inline_enabled_for(&self, connection: ConnectionId) -> bool {
+        let s = &self.inline.settings;
+        let on = self
+            .connections
+            .iter()
+            .find(|p| p.id == connection)
+            .and_then(ConnectionProfile::inline_ai)
+            .unwrap_or(s.enabled);
+        on && s.provider.is_some() && s.model.is_some()
+    }
+
+    /// Drives the debounce for the focused editor. Returns when to check again, so the view can
+    /// ask for a repaint at that moment (egui only repaints on events otherwise).
+    pub fn inline_tick(
+        &mut self,
+        now: Instant,
+        tab: TabId,
+        cursor: usize,
+        focused: bool,
+        popup_open: bool,
+    ) -> Option<Duration> {
+        let (session, connection, text) = {
+            let t = self.tabs.iter().find(|t| t.id == tab)?;
+            let connection = self
+                .open
+                .iter()
+                .find(|o| o.session == t.session)?
+                .connection;
+            (t.session, connection, t.text.clone())
+        };
+        // A completion popup has priority: ghost text only shows when no popup is open.
+        let enabled = focused && !popup_open && self.inline_enabled_for(connection);
+        let snapshot = Snapshot::new(tab, cursor, &text);
+        let eligible = InlineState::eligible(&text, cursor);
+        let tick = self.inline.tick(now, enabled, snapshot, eligible);
+        if let Some(id) = tick.cancel {
+            self.outbox.push(Command::InlineCancel(id));
+        }
+        if let Some(id) = tick.request {
+            self.outbox.push(Command::InlineSuggest {
+                id,
+                session,
+                text,
+                cursor,
+            });
+        }
+        tick.wake_in
+    }
+
+    /// The ghost text to draw at the cursor, if one was made for exactly this position.
+    pub fn inline_ghost(&self, tab: TabId, cursor: usize) -> Option<&Ghost> {
+        let text = &self.tabs.iter().find(|t| t.id == tab)?.text;
+        self.inline.ghost_for(Snapshot::new(tab, cursor, text))
+    }
+
+    /// Tab: inserts the ghost text at the cursor and returns the new cursor (byte offset). The
+    /// text only lands in the editor; running it is still the user's call.
+    pub fn inline_accept(&mut self, tab: TabId, cursor: usize) -> Option<usize> {
+        let text = self.tabs.iter().find(|t| t.id == tab)?.text.clone();
+        let ghost = self.inline.take_ghost(Snapshot::new(tab, cursor, &text))?;
+        let t = self.tab_mut(tab)?;
+        if !t.text.is_char_boundary(cursor) {
+            return None;
+        }
+        t.text.insert_str(cursor, &ghost.text);
+        t.completion = CompletionState::default();
+        Some(cursor + ghost.text.len())
+    }
+
+    fn save_inline_settings(&mut self) {
+        self.outbox
+            .push(Command::SaveInlineSettings(self.inline.settings.clone()));
+    }
+
+    /// The master switch. Turning it off also cancels anything in flight and hides ghost text.
+    pub fn inline_set_enabled(&mut self, enabled: bool) {
+        self.inline.settings.enabled = enabled;
+        if !enabled && let Some(id) = self.inline.reset() {
+            self.outbox.push(Command::InlineCancel(id));
+        }
+        self.save_inline_settings();
+    }
+
+    pub fn inline_select_provider(&mut self, id: ProviderId) {
+        if self.inline.settings.provider.as_ref() == Some(&id) {
+            return;
+        }
+        self.inline.settings = InlineSettings {
+            provider: Some(id.clone()),
+            model: None,
+            ..self.inline.settings.clone()
+        };
+        self.outbox.push(Command::ListModels(id));
+        self.save_inline_settings();
+    }
+
+    pub fn inline_select_model(&mut self, id: ModelId) {
+        self.inline.settings.model = Some(id);
+        self.save_inline_settings();
+    }
+
     // --- autocomplete ---------------------------------------------------------------------
 
     /// Local completions for the tab's text at a byte offset. Empty until the schema is loaded.
@@ -665,6 +779,20 @@ impl Presenter {
 
     pub fn handle(&mut self, event: Event) {
         match event {
+            Event::InlineText { id, completion } => {
+                self.inline
+                    .on_text(id, completion.suggestion.text, completion.safety);
+            }
+            Event::InlineDone { id, error } => self.inline.on_done(id, error),
+            Event::InlineSettings(Ok(settings)) => {
+                if let Some(provider) = settings.provider.clone() {
+                    self.outbox.push(Command::ListModels(provider));
+                }
+                self.inline.settings = settings;
+            }
+            Event::InlineSettings(Err(e)) => {
+                self.error(format!("Could not load inline settings: {e}"))
+            }
             Event::Notice(Ok(message)) => self.status = Some(Status::Info(message)),
             Event::Notice(Err(message)) => self.error(message),
             e @ (Event::AiText { .. }
@@ -821,7 +949,11 @@ mod tests {
         let mut p = Presenter::new(vec![(DriverKind::new("postgres"), Dialect::ANSI)], vec![]);
         assert!(matches!(
             p.take_commands().as_slice(),
-            [Command::LoadConnections, Command::LoadAiSettings]
+            [
+                Command::LoadConnections,
+                Command::LoadAiSettings,
+                Command::LoadInlineSettings
+            ]
         ));
         p
     }
@@ -1368,8 +1500,9 @@ mod tests {
             matches!(cmds[0], Command::LoadConnections)
                 && matches!(cmds[1], Command::LoadAiSettings)
         );
-        assert!(matches!(&cmds[2], Command::LoadApiKeyStatus(id) if id.as_str() == "cloud"));
-        assert_eq!(cmds.len(), 3);
+        assert!(matches!(cmds[2], Command::LoadInlineSettings));
+        assert!(matches!(&cmds[3], Command::LoadApiKeyStatus(id) if id.as_str() == "cloud"));
+        assert_eq!(cmds.len(), 4);
     }
 
     #[test]
@@ -1788,5 +1921,301 @@ mod tests {
         p.handle(Event::Connections(Ok(vec![ro, rw])));
         assert!(p.is_read_only(ro_id) && !p.is_read_only(rw_id));
         assert!(!p.is_read_only(ConnectionId::new()));
+    }
+
+    // ---- LLM inline suggestions -------------------------------------------------------
+
+    use application::llm::StatementKind;
+    use application::sql::{Suggestion, SuggestionKind, SuggestionSource};
+    use application::usecases::{InlineCompletion, InlineSettings};
+
+    fn inline_on() -> InlineSettings {
+        InlineSettings {
+            enabled: true,
+            provider: Some(ProviderId::new("local")),
+            model: Some(ModelId::new("tiny")),
+        }
+    }
+
+    /// Ready presenter with the editor text `text` and the cursor at its end.
+    fn inline_ready(settings: InlineSettings, text: &str) -> (Presenter, TabId) {
+        let (mut p, tab) = ai_ready();
+        p.handle(Event::InlineSettings(Ok(settings)));
+        p.tab_mut(tab).expect("tab").text = text.into();
+        p.take_commands();
+        (p, tab)
+    }
+
+    fn inline_cmds(p: &mut Presenter) -> Vec<Command> {
+        p.take_commands()
+            .into_iter()
+            .filter(|c| matches!(c, Command::InlineSuggest { .. } | Command::InlineCancel(_)))
+            .collect()
+    }
+
+    const T: fn(u64) -> Duration = Duration::from_millis;
+
+    fn completion(text: &str, safety: Option<StatementKind>) -> InlineCompletion {
+        InlineCompletion {
+            suggestion: Suggestion {
+                range: 0..0,
+                text: text.into(),
+                kind: SuggestionKind::Inline,
+                source: SuggestionSource::Llm,
+                detail: None,
+            },
+            safety,
+        }
+    }
+
+    #[test]
+    fn nothing_is_ever_requested_while_inline_suggestions_are_off() {
+        let (mut p, tab) = inline_ready(InlineSettings::default(), "SELECT * FROM ");
+        let t0 = Instant::now();
+        for i in 0..20u64 {
+            p.inline_tick(t0 + T(i * 300), tab, 14, true, false);
+        }
+        assert!(inline_cmds(&mut p).is_empty());
+
+        // Provider chosen but the switch is still off.
+        let off = InlineSettings {
+            enabled: false,
+            ..inline_on()
+        };
+        p.handle(Event::InlineSettings(Ok(off)));
+        p.take_commands();
+        for i in 0..20u64 {
+            p.inline_tick(t0 + T(i * 300), tab, 14, true, false);
+        }
+        assert!(inline_cmds(&mut p).is_empty());
+    }
+
+    #[test]
+    fn enabled_without_a_provider_or_model_sends_nothing() {
+        let (mut p, tab) = inline_ready(
+            InlineSettings {
+                enabled: true,
+                provider: None,
+                model: None,
+            },
+            "SELECT * FROM ",
+        );
+        let t0 = Instant::now();
+        p.inline_tick(t0, tab, 14, true, false);
+        p.inline_tick(t0 + T(1000), tab, 14, true, false);
+        assert!(inline_cmds(&mut p).is_empty());
+    }
+
+    #[test]
+    fn a_request_follows_the_quiet_period_and_carries_the_editor_state() {
+        let (mut p, tab) = inline_ready(inline_on(), "SELECT * FROM ");
+        let t0 = Instant::now();
+        assert_eq!(p.inline_tick(t0, tab, 14, true, false), Some(T(400)));
+        assert!(inline_cmds(&mut p).is_empty());
+        assert_eq!(
+            p.inline_tick(t0 + T(100), tab, 14, true, false),
+            Some(T(300))
+        );
+
+        p.inline_tick(t0 + T(400), tab, 14, true, false);
+        let cmds = inline_cmds(&mut p);
+        assert!(
+            matches!(&cmds[..], [Command::InlineSuggest { session, text, cursor, .. }]
+            if *session == SessionId(1) && text == "SELECT * FROM " && *cursor == 14),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn typing_cancels_the_running_request_and_hides_the_ghost() {
+        let (mut p, tab) = inline_ready(inline_on(), "SELECT * FROM ");
+        let t0 = Instant::now();
+        p.inline_tick(t0, tab, 14, true, false);
+        p.inline_tick(t0 + T(400), tab, 14, true, false);
+        let Some(Command::InlineSuggest { id, .. }) = inline_cmds(&mut p).pop() else {
+            panic!("request")
+        };
+        p.handle(Event::InlineText {
+            id,
+            completion: completion("customers", None),
+        });
+        assert!(p.inline_ghost(tab, 14).is_some());
+
+        p.tab_mut(tab).expect("tab").text = "SELECT * FROM c".into();
+        p.inline_tick(t0 + T(500), tab, 15, true, false);
+        assert!(matches!(inline_cmds(&mut p).as_slice(), [Command::InlineCancel(c)] if *c == id));
+        assert!(p.inline_ghost(tab, 15).is_none() && p.inline_ghost(tab, 14).is_none());
+    }
+
+    #[test]
+    fn a_late_answer_for_a_stale_request_is_dropped() {
+        let (mut p, tab) = inline_ready(inline_on(), "SELECT * FROM ");
+        let t0 = Instant::now();
+        p.inline_tick(t0, tab, 14, true, false);
+        p.inline_tick(t0 + T(400), tab, 14, true, false);
+        let Some(Command::InlineSuggest { id, .. }) = inline_cmds(&mut p).pop() else {
+            panic!("request")
+        };
+        p.tab_mut(tab).expect("tab").text = "SELECT * FROM x".into();
+        p.inline_tick(t0 + T(450), tab, 15, true, false);
+
+        p.handle(Event::InlineText {
+            id,
+            completion: completion("late", None),
+        });
+        assert!(p.inline_ghost(tab, 15).is_none());
+    }
+
+    #[test]
+    fn the_connection_override_wins_over_the_global_switch() {
+        let (mut p, tab) = inline_ready(inline_on(), "SELECT * FROM ");
+        let connection = p.open[0].connection;
+        let t0 = Instant::now();
+
+        p.connections[0].set_inline_ai(Some(false));
+        assert!(!p.inline_enabled_for(connection));
+        p.inline_tick(t0, tab, 14, true, false);
+        p.inline_tick(t0 + T(1000), tab, 14, true, false);
+        assert!(
+            inline_cmds(&mut p).is_empty(),
+            "a connection that opted out sends nothing"
+        );
+
+        let off = InlineSettings {
+            enabled: false,
+            ..inline_on()
+        };
+        p.handle(Event::InlineSettings(Ok(off)));
+        p.connections[0].set_inline_ai(Some(true));
+        assert!(p.inline_enabled_for(connection));
+        p.inline_tick(t0 + T(2000), tab, 14, true, false);
+        p.inline_tick(t0 + T(2400), tab, 14, true, false);
+        assert_eq!(inline_cmds(&mut p).len(), 1);
+    }
+
+    #[test]
+    fn an_open_completion_popup_or_lost_focus_suppresses_inline_requests() {
+        let (mut p, tab) = inline_ready(inline_on(), "SELECT * FROM ");
+        let t0 = Instant::now();
+        for i in 0..5u64 {
+            p.inline_tick(t0 + T(i * 500), tab, 14, true, true); // popup open
+            p.inline_tick(t0 + T(i * 500), tab, 14, false, false); // not focused
+        }
+        assert!(inline_cmds(&mut p).is_empty());
+    }
+
+    #[test]
+    fn opening_the_popup_cancels_a_running_request() {
+        let (mut p, tab) = inline_ready(inline_on(), "SELECT * FROM ");
+        let t0 = Instant::now();
+        p.inline_tick(t0, tab, 14, true, false);
+        p.inline_tick(t0 + T(400), tab, 14, true, false);
+        let Some(Command::InlineSuggest { id, .. }) = inline_cmds(&mut p).pop() else {
+            panic!("request")
+        };
+        p.inline_tick(t0 + T(450), tab, 14, true, true);
+        assert!(matches!(inline_cmds(&mut p).as_slice(), [Command::InlineCancel(c)] if *c == id));
+    }
+
+    #[test]
+    fn text_after_the_cursor_on_the_same_line_means_no_suggestion() {
+        let (mut p, tab) = inline_ready(inline_on(), "SELECT  FROM t");
+        let t0 = Instant::now();
+        p.inline_tick(t0, tab, 7, true, false);
+        p.inline_tick(t0 + T(1000), tab, 7, true, false);
+        assert!(inline_cmds(&mut p).is_empty());
+    }
+
+    #[test]
+    fn accepting_inserts_the_ghost_text_and_never_runs_anything() {
+        let (mut p, tab) = inline_ready(inline_on(), "SELECT * FROM ");
+        let t0 = Instant::now();
+        p.inline_tick(t0, tab, 14, true, false);
+        p.inline_tick(t0 + T(400), tab, 14, true, false);
+        let Some(Command::InlineSuggest { id, .. }) = inline_cmds(&mut p).pop() else {
+            panic!("request")
+        };
+        p.handle(Event::InlineText {
+            id,
+            completion: completion("customers", Some(StatementKind::Read)),
+        });
+
+        assert_eq!(
+            p.inline_ghost(tab, 14).and_then(|g| g.safety),
+            Some(StatementKind::Read)
+        );
+        assert_eq!(
+            p.inline_accept(tab, 13),
+            None,
+            "only at the position it was made for"
+        );
+        assert_eq!(p.inline_accept(tab, 14), Some(23));
+        assert_eq!(
+            p.selected_tab().map(|t| t.text.as_str()),
+            Some("SELECT * FROM customers")
+        );
+        assert_eq!(p.inline_accept(tab, 23), None, "the ghost is consumed");
+        let cmds = p.take_commands();
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Command::Execute { .. })),
+            "{cmds:?}"
+        );
+        assert!(matches!(
+            p.selected_tab().map(|t| &t.state),
+            Some(TabState::Idle)
+        ));
+    }
+
+    #[test]
+    fn the_switch_saves_and_turning_it_off_cancels_what_is_running() {
+        let (mut p, tab) = inline_ready(inline_on(), "SELECT * FROM ");
+        let t0 = Instant::now();
+        p.inline_tick(t0, tab, 14, true, false);
+        p.inline_tick(t0 + T(400), tab, 14, true, false);
+        let Some(Command::InlineSuggest { id, .. }) = inline_cmds(&mut p).pop() else {
+            panic!("request")
+        };
+
+        p.inline_set_enabled(false);
+        let cmds = p.take_commands();
+        assert!(matches!(&cmds[0], Command::InlineCancel(c) if *c == id));
+        assert!(matches!(&cmds[1], Command::SaveInlineSettings(s) if !s.enabled));
+        assert!(p.inline_ghost(tab, 14).is_none());
+
+        p.inline_set_enabled(true);
+        assert!(matches!(&p.take_commands()[0], Command::SaveInlineSettings(s) if s.enabled));
+    }
+
+    #[test]
+    fn choosing_the_inline_provider_resets_the_model_and_lists_models() {
+        let (mut p, _) = inline_ready(inline_on(), "");
+        p.inline_select_provider(ProviderId::new("cloud"));
+        assert_eq!(p.inline.settings.model, None);
+        assert!(p.inline.settings.enabled, "the switch is untouched");
+        let cmds = p.take_commands();
+        assert!(matches!(&cmds[0], Command::ListModels(id) if id.as_str() == "cloud"));
+        assert!(
+            matches!(&cmds[1], Command::SaveInlineSettings(s) if s.provider == Some(ProviderId::new("cloud")))
+        );
+        p.inline_select_provider(ProviderId::new("cloud"));
+        assert!(
+            p.take_commands().is_empty(),
+            "same provider again: nothing to do"
+        );
+        p.inline_select_model(ModelId::new("big"));
+        assert!(
+            matches!(&p.take_commands()[0], Command::SaveInlineSettings(s) if s.model == Some(ModelId::new("big")) && s.enabled)
+        );
+    }
+
+    #[test]
+    fn loaded_inline_settings_trigger_a_model_listing_and_errors_are_reported() {
+        let (mut p, _) = ai_ready();
+        p.handle(Event::InlineSettings(Ok(inline_on())));
+        assert!(
+            matches!(p.take_commands().as_slice(), [Command::ListModels(id)] if id.as_str() == "local")
+        );
+        p.handle(Event::InlineSettings(Err("disk".into())));
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("disk")));
     }
 }

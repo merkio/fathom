@@ -1,0 +1,19 @@
+---
+source: crates/application/tests/prompts.rs
+expression: render(&p)
+---
+template: inline_sql/v1
+
+--- system ---
+You are a database assistant inside a SQL client.
+Database: postgres. Quote identifiers with ". Row limits use LIMIT n.
+
+Schema (names and types only, no data):
+public.customers(id integer PK NOT NULL, name text NOT NULL, email text)
+public.orders(id integer PK NOT NULL, customer_id integer NOT NULL, total numeric(10,2)) FK(customer_id)->customers(id)
+
+Task: complete the SQL the user is typing at the marker <CURSOR>. Reply with ONLY the text to insert at the marker: no explanation, no code fences, and do not repeat the text before the marker. Use only tables and columns from the schema. If you are not confident, reply with nothing.
+
+--- messages ---
+[User]
+SELECT c.name FROM customers c JOIN <CURSOR> ON c.id = o.customer_id

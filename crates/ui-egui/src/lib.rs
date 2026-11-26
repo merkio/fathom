@@ -6,6 +6,7 @@ pub mod app;
 pub mod backend;
 pub mod bridge;
 pub mod form;
+pub mod inline;
 pub mod presenter;
 mod views;
 
