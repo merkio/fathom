@@ -34,6 +34,30 @@ fn ssl_mode(profile: &ConnectionProfile) -> Result<PgSslMode, DbError> {
     }
 }
 
+/// A path option that must point at an existing file; absent or blank means "not set".
+fn file_option(
+    profile: &ConnectionProfile,
+    key: &str,
+    what: &str,
+) -> Result<Option<std::path::PathBuf>, DbError> {
+    let Some(value) = profile
+        .options
+        .get(key)
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(None);
+    };
+    let path = std::path::PathBuf::from(value);
+    if path.is_file() {
+        Ok(Some(path))
+    } else {
+        Err(DbError::Connection(format!(
+            "The {what} file was not found: {value}"
+        )))
+    }
+}
+
 fn options(
     profile: &ConnectionProfile,
     secret: Option<&SecretString>,
@@ -46,6 +70,16 @@ fn options(
         .ssl_mode(ssl_mode(profile)?);
     if let Some(db) = &profile.database {
         opts = opts.database(db);
+    }
+    // TLS: a CA to verify the server against, and optionally a client certificate and key.
+    if let Some(path) = file_option(profile, "sslrootcert", "CA certificate")? {
+        opts = opts.ssl_root_cert(path);
+    }
+    if let Some(path) = file_option(profile, "sslcert", "client certificate")? {
+        opts = opts.ssl_client_cert(path);
+    }
+    if let Some(path) = file_option(profile, "sslkey", "client key")? {
+        opts = opts.ssl_client_key(path);
     }
     if let Some(secret) = secret {
         opts = opts.password(secret.expose_secret());
@@ -115,6 +149,45 @@ mod tests {
             ssl_mode(&profile(Some("bogus"))),
             Err(DbError::Unsupported(_))
         ));
+    }
+
+    fn with(options: &[(&str, &str)]) -> ConnectionProfile {
+        let mut p = profile(None);
+        for (k, v) in options {
+            p.options.insert((*k).into(), (*v).into());
+        }
+        p
+    }
+
+    #[test]
+    fn tls_file_options_must_point_at_existing_files() {
+        for key in ["sslrootcert", "sslcert", "sslkey"] {
+            let err = options(&with(&[(key, "/definitely/not/here.pem")]), None).err();
+            assert!(
+                matches!(&err, Some(DbError::Connection(m)) if m.contains("not found") && m.contains("/definitely/not/here.pem")),
+                "{key}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn blank_tls_file_options_are_ignored_and_existing_files_are_accepted() {
+        assert!(
+            options(
+                &with(&[("sslrootcert", "   "), ("sslmode", "require")]),
+                None
+            )
+            .is_ok()
+        );
+        let file = std::env::current_exe().expect("exe"); // any existing file
+        let path = file.display().to_string();
+        assert!(
+            options(
+                &with(&[("sslrootcert", &path), ("sslmode", "verify-full")]),
+                None
+            )
+            .is_ok()
+        );
     }
 
     #[test]
