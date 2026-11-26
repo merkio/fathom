@@ -155,5 +155,10 @@ fn notify_is_called_for_every_event() {
     });
     backend.send(Command::LoadConnections);
     assert!(matches!(next(&events), Event::Connections(Ok(_))));
+    // `notify` runs right after the event is sent, so give it a moment instead of racing it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while counter.load(Ordering::SeqCst) < 1 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 }

@@ -10,3 +10,14 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[dependencies]
+domain = { path = "../domain" }
+application = { path = "../application" }
+storage = { path = "../storage" }
+db-postgres = { path = "../db-postgres" }
+ui-egui = { path = "../ui-egui" }
+anyhow = "1"
+directories = "6"
+futures = "0.3"
+secrecy = "0.10"

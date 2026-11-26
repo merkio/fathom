@@ -12,6 +12,8 @@ domain = { path = "../domain" }
 application = { path = "../application" }
 secrecy = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+eframe = "0.37"
+egui_extras = "0.37"
 
 [dev-dependencies]
 test-support = { path = "../test-support" }
