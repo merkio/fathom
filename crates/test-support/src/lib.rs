@@ -5,6 +5,7 @@ pub mod driver_contract;
 pub mod fake_driver;
 pub mod fake_llm;
 pub mod in_memory;
+pub mod llm_contract;
 
 pub use fake_driver::{FakeDriver, FakeSession};
 pub use fake_llm::FakeLlm;

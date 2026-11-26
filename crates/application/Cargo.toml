@@ -12,7 +12,9 @@ domain = { path = "../domain" }
 async-trait = "0.1"
 futures = "0.3"
 secrecy = "0.10"
+sqlparser = "0.64"
 thiserror = "2"
 
 [dev-dependencies]
 test-support = { path = "../test-support" }
+insta = "1"

@@ -14,6 +14,8 @@ use crate::lock;
 pub struct FakeLlm {
     id: ProviderId,
     chunks: Vec<String>,
+    usage: Option<Usage>,
+    models: Vec<String>,
     error: Option<LlmError>,
     requests: Arc<Mutex<Vec<LlmRequest>>>,
 }
@@ -23,9 +25,22 @@ impl FakeLlm {
         Self {
             id: ProviderId::new(id),
             chunks: chunks.iter().map(|c| (*c).to_owned()).collect(),
+            usage: None,
+            models: vec!["fake-model".to_owned()],
             error: None,
             requests: Arc::default(),
         }
+    }
+
+    /// Token usage reported with every reply (as a `Usage` chunk when streaming).
+    pub fn with_usage(mut self, usage: Usage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
+    pub fn with_models(mut self, models: &[&str]) -> Self {
+        self.models = models.iter().map(|m| (*m).to_owned()).collect();
+        self
     }
 
     pub fn failing(mut self, error: LlmError) -> Self {
@@ -46,10 +61,17 @@ impl LlmProvider for FakeLlm {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
-        Ok(vec![ModelInfo {
-            id: ModelId::new("fake-model"),
-            display_name: "Fake".into(),
-        }])
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        Ok(self
+            .models
+            .iter()
+            .map(|m| ModelInfo {
+                id: ModelId::new(m.clone()),
+                display_name: m.clone(),
+            })
+            .collect())
     }
 
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
@@ -59,7 +81,7 @@ impl LlmProvider for FakeLlm {
         }
         Ok(LlmResponse {
             text: self.chunks.concat(),
-            usage: Some(Usage::default()),
+            usage: self.usage,
         })
     }
 
@@ -72,6 +94,7 @@ impl LlmProvider for FakeLlm {
             .chunks
             .iter()
             .map(|c| Ok(LlmChunk::Text(c.clone())))
+            .chain(self.usage.map(|u| Ok(LlmChunk::Usage(u))))
             .chain([Ok(LlmChunk::Done)])
             .collect();
         stream::iter(items).boxed()
