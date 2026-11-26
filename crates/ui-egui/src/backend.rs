@@ -6,13 +6,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use application::error::UseCaseError;
+use application::error_text::describe;
 use application::ports::{DbSession, IntrospectScope, LlmChunk};
-use application::usecases::{AssistRequest, InlineRequest, UseCases};
+use application::redact::redact;
+use application::usecases::{AssistRequest, ExportResult, InlineRequest, UseCases};
 use domain::{Dialect, QueryRequest, SchemaTree};
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use crate::bridge::{AiAsk, AiId, Command, Event, SessionId};
+use crate::bridge::{AiAsk, AiId, Command, Event, ExportDone, SessionId};
+use crate::export::resolve_path;
 
 const HISTORY_LIMIT: usize = 200;
 
@@ -104,8 +108,13 @@ impl Backend {
     }
 }
 
-fn text<E: std::fmt::Display>(e: E) -> String {
-    e.to_string()
+/// Message for the user: what happened and what to try, with any secret scrubbed.
+fn text(e: UseCaseError) -> String {
+    describe(&e).to_text()
+}
+
+fn llm_text(e: application::ports::LlmError) -> String {
+    text(UseCaseError::Llm(e))
 }
 
 async fn handle(sh: Arc<Shared>, command: Command) {
@@ -156,6 +165,14 @@ async fn handle(sh: Arc<Shared>, command: Command) {
                 }
                 Err(e) => Err(text(e)),
             };
+            match &result {
+                Ok(session) => {
+                    tracing::info!(connection = %connection.0, session = session.0, "connected")
+                }
+                Err(message) => {
+                    tracing::warn!(connection = %connection.0, error = %redact(message), "connect failed")
+                }
+            }
             sh.emit(Event::Connected { connection, result });
         }
         Command::Disconnect(id) => {
@@ -199,6 +216,7 @@ async fn handle(sh: Arc<Shared>, command: Command) {
             connection,
             text: sql,
         } => {
+            let started = std::time::Instant::now();
             let result = match sh.session(session).await {
                 Ok(open) => uc
                     .execute_query
@@ -213,6 +231,22 @@ async fn handle(sh: Arc<Shared>, command: Command) {
                     .map_err(text),
                 Err(e) => Err(e),
             };
+            // Never log the SQL text: it can contain sensitive literals.
+            match &result {
+                Ok(r) => tracing::info!(
+                    session = session.0,
+                    rows = r.rows.len(),
+                    truncated = r.truncated,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "query finished"
+                ),
+                Err(message) => tracing::warn!(
+                    session = session.0,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    error = %redact(message),
+                    "query failed"
+                ),
+            }
             sh.emit(Event::QueryFinished { tab, result });
         }
         Command::Cancel(id) => {
@@ -285,7 +319,12 @@ async fn handle(sh: Arc<Shared>, command: Command) {
             }
         }
         Command::LoadInlineSettings => {
-            let result = uc.suggest_inline.settings().load().await.map_err(text);
+            let result = uc
+                .suggest_inline
+                .settings()
+                .load()
+                .await
+                .map_err(|e| text(UseCaseError::Storage(e)));
             sh.emit(Event::InlineSettings(result));
         }
         Command::SaveInlineSettings(settings) => {
@@ -294,6 +333,25 @@ async fn handle(sh: Arc<Shared>, command: Command) {
                     "Could not save the inline settings: {e}"
                 ))));
             }
+        }
+        Command::Export {
+            tab,
+            session,
+            connection,
+            text: sql,
+            format,
+            name,
+        } => {
+            let result = run_export(&sh, session, connection, sql, format, name).await;
+            match &result {
+                Ok(done) => tracing::info!(
+                    rows = done.rows,
+                    truncated = done.truncated,
+                    "export finished"
+                ),
+                Err(message) => tracing::warn!(error = %redact(message), "export failed"),
+            }
+            sh.emit(Event::Exported { tab, result });
         }
         Command::ListModels(provider) => {
             let result = uc.list_models.execute(&provider).await.map_err(text);
@@ -319,6 +377,12 @@ fn assist_request(ask: &AiAsk) -> AssistRequest<'_> {
 async fn run_ai(sh: &Arc<Shared>, ask: AiAsk) {
     let uc = &sh.use_cases;
     let id = ask.id;
+    // Provider and model only; never the prompt, the schema or any row data.
+    tracing::info!(
+        provider = ask.provider.as_str(),
+        model = ask.model.as_str(),
+        "ai request started"
+    );
     let req = assist_request(&ask);
     let mut stream = match uc.assistant.stream(&req) {
         Ok(s) => s,
@@ -347,7 +411,7 @@ async fn run_ai(sh: &Arc<Shared>, ask: AiAsk) {
                 Some(Ok(LlmChunk::Usage(u))) => usage = Some(u),
                 Some(Ok(LlmChunk::Done)) | None => break,
                 Some(Err(e)) => {
-                    failure = Some(text(e));
+                    failure = Some(llm_text(e));
                     break;
                 }
             },
@@ -375,6 +439,15 @@ async fn run_ai(sh: &Arc<Shared>, ask: AiAsk) {
             Ok(finished)
         }
     };
+    match &result {
+        Ok(reply) => tracing::info!(
+            has_sql = reply.sql.is_some(),
+            input_tokens = reply.usage.map_or(0, |u| u.input_tokens),
+            output_tokens = reply.usage.map_or(0, |u| u.output_tokens),
+            "ai request finished"
+        ),
+        Err(message) => tracing::warn!(error = %redact(message), "ai request failed"),
+    }
     sh.emit(Event::AiFinished { id, result });
 }
 
@@ -423,7 +496,7 @@ async fn run_inline(sh: &Arc<Shared>, id: AiId, session: SessionId, editor: Stri
             item = stream.next() => match item {
                 Some(Ok(completion)) => sh.emit(Event::InlineText { id, completion }),
                 Some(Err(e)) => {
-                    failure = Some(text(e));
+                    failure = Some(llm_text(e));
                     break;
                 }
                 None => break,
@@ -434,4 +507,65 @@ async fn run_inline(sh: &Arc<Shared>, id: AiId, session: SessionId, editor: Stri
     drop(stream);
     sh.ai_stops.lock().await.remove(&id);
     sh.emit(Event::InlineDone { id, error: failure });
+}
+
+/// Re-runs the statement (up to the export cap) and writes it to a **new** file: an existing
+/// file is never overwritten, and a failed export leaves no partial file behind.
+async fn run_export(
+    sh: &Arc<Shared>,
+    session: SessionId,
+    connection: domain::ConnectionId,
+    sql: String,
+    format: application::export::ExportFormat,
+    name: String,
+) -> Result<ExportDone, String> {
+    use std::io::Write;
+
+    let uc = &sh.use_cases;
+    let open = sh.session(session).await?;
+    let path = resolve_path(&uc.export.directory, &name, format)?;
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| text(UseCaseError::Io(e.to_string())))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                format!("`{}` already exists. Choose another name; existing files are never overwritten.", path.display())
+            }
+            _ => text(UseCaseError::Io(e.to_string())),
+        })?;
+    let mut out = std::io::BufWriter::new(file);
+
+    let summary = ExportResult::new(&uc.execute_query)
+        .run(
+            connection,
+            open.session.as_ref(),
+            &sql,
+            &open.dialect,
+            open.read_only,
+            format,
+            uc.export.max_rows,
+            &mut out,
+        )
+        .await;
+    let finished = summary.and_then(|s| {
+        out.flush()
+            .map(|()| s)
+            .map_err(|e| UseCaseError::Io(e.to_string()))
+    });
+    match finished {
+        Ok(summary) => Ok(ExportDone {
+            path,
+            rows: summary.rows,
+            truncated: summary.truncated,
+        }),
+        Err(e) => {
+            drop(out);
+            let _ = std::fs::remove_file(&path);
+            Err(text(e))
+        }
+    }
 }

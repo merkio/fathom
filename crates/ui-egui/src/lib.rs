@@ -5,6 +5,7 @@ pub mod ai;
 pub mod app;
 pub mod backend;
 pub mod bridge;
+pub mod export;
 pub mod form;
 pub mod inline;
 pub mod presenter;
@@ -12,5 +13,5 @@ mod views;
 
 pub use app::{DbieverApp, run};
 pub use backend::Backend;
-pub use bridge::{AiAsk, AiId, AiTask, Command, Event, SessionId, TabId};
+pub use bridge::{AiAsk, AiId, AiTask, Command, Event, ExportDone, SessionId, TabId};
 pub use presenter::Presenter;

@@ -32,7 +32,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
         .resizable(true)
         .default_size(300.0)
         .min_size(120.0)
-        .show(ui, |ui| super::results::show(ui, p));
+        .show(ui, |ui| {
+            super::results::export_controls(ui, p);
+            super::results::show(ui, p);
+        });
 
     let height = ui.available_height();
     egui::ScrollArea::vertical()

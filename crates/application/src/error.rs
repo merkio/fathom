@@ -20,6 +20,8 @@ pub enum UseCaseError {
     UnknownProvider(ProviderId),
     #[error("{0}")]
     Blocked(String),
+    #[error("could not write the export: {0}")]
+    Io(String),
     #[error("no driver registered for `{}`", .0.as_str())]
     UnknownDriver(DriverKind),
     #[error("connection {} not found", .0.0)]
