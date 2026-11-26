@@ -1,0 +1,12 @@
+[package]
+name = "test-support"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Used only by tests/architecture.rs to parse `cargo metadata` output.
+[dev-dependencies]
+serde_json = "1"
