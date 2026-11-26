@@ -1,5 +1,13 @@
 # DBiever
 
+[![CI](https://github.com/merkio/fathom/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/merkio/fathom/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/merkio/fathom/graph/badge.svg)](https://codecov.io/gh/merkio/fathom)
+[![Dependencies](https://deps.rs/repo/github/merkio/fathom/status.svg)](https://deps.rs/repo/github/merkio/fathom)
+[![Release](https://img.shields.io/github/v/release/merkio/fathom?include_prereleases&sort=semver)](https://github.com/merkio/fathom/releases)
+[![License](https://img.shields.io/github/license/merkio/fathom)](LICENSE)
+[![Rust edition](https://img.shields.io/badge/rust-edition%202024-orange?logo=rust)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+[![Last commit](https://img.shields.io/github/last-commit/merkio/fathom)](https://github.com/merkio/fathom/commits/main)
+
 A desktop database client written in Rust ([egui](https://github.com/emilk/egui)), with
 optional LLM assistance. It connects to PostgreSQL, MySQL/MariaDB and SQLite. New databases and LLM providers plug in as separate crates.
 
@@ -117,6 +125,34 @@ test-support  fakes and the shared contract suites every adapter must pass
 contract suite from its tests, add it to the workspace, and add one `drivers.register(...)` line in
 `crates/app/src/main.rs`. Nothing in `domain`, `application` or `ui-egui` changes (the SQLite adapter
 was added exactly this way). **Adding an LLM provider** is the same with `LlmProvider`.
+
+## Quality gates (CI)
+
+Every push to any branch and every pull request runs the `CI` workflow; the badge above reflects it.
+
+| Job | What it checks |
+|---|---|
+| Format | `cargo fmt --check` |
+| Lint | `cargo clippy --all-targets --all-features -D warnings` (no `unwrap`/`expect` outside tests) |
+| Tests | `cargo test --workspace`, including the architecture test that enforces the layer rules |
+| Coverage | `cargo llvm-cov` over the unit **and** database integration tests; uploaded to Codecov. egui drawing code and `main()` are excluded (not testable without a display) |
+| Integration | The shared driver contract against real PostgreSQL 18 and 16, MySQL 8.4 and 9, MariaDB 11 |
+| Dependencies | `cargo-deny`: security advisories, licences, banned and unknown sources (also weekly) |
+| Build (macOS, Windows) | Informational until proven green |
+
+Dependabot keeps the workflow actions and Rust dependencies current. To enable the coverage badge, add
+the repository to [Codecov](https://codecov.io) and set the `CODECOV_TOKEN` secret; to make the checks
+mandatory, require them in the branch protection rules of `main`.
+
+## Releasing
+
+1. Set the new version in `Cargo.toml` (`[workspace.package] version`) and merge it.
+2. Push a tag `vX.Y.Z` (for example `v0.2.0`; a suffix such as `-rc.1` makes a pre-release).
+3. The `Release` workflow runs the full CI, checks that the tag equals the crate version, builds Linux
+   (x86_64), macOS (Apple Silicon and Intel) and Windows (x86_64), and attaches the archives and
+   `SHA256SUMS.txt` to a GitHub release with generated notes.
+
+The binaries are **not code-signed**: macOS Gatekeeper and Windows SmartScreen will warn on first run.
 
 ## License
 
