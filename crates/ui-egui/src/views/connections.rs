@@ -130,6 +130,32 @@ pub fn show_form(ctx: &egui::Context, p: &mut Presenter) {
                         );
                         ui.end_row();
 
+                        ui.label("AI inline");
+                        egui::ComboBox::from_id_salt("inline_override")
+                            .selected_text(match form.inline_ai {
+                                None => "Use the global setting",
+                                Some(true) => "On for this connection",
+                                Some(false) => "Off for this connection",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut form.inline_ai,
+                                    None,
+                                    "Use the global setting",
+                                );
+                                ui.selectable_value(
+                                    &mut form.inline_ai,
+                                    Some(true),
+                                    "On for this connection",
+                                );
+                                ui.selectable_value(
+                                    &mut form.inline_ai,
+                                    Some(false),
+                                    "Off for this connection",
+                                );
+                            });
+                        ui.end_row();
+
                         ui.label("Password");
                         let hint = if form.is_editing() { "unchanged" } else { "" };
                         ui.add(

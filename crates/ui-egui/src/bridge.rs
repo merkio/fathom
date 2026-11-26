@@ -3,7 +3,9 @@
 //! Errors cross the bridge as display strings: the UI only shows them.
 
 use application::ports::{HistoryEntry, ModelInfo};
-use application::usecases::{AiSettings, AssistReply, AssistTask, PromptPreview};
+use application::usecases::{
+    AiSettings, AssistReply, AssistTask, InlineCompletion, InlineSettings, PromptPreview,
+};
 use domain::{
     ChatMessage, ConnectionId, ConnectionProfile, Dialect, ModelId, ProviderId, QueryResult,
     SchemaTree,
@@ -115,6 +117,18 @@ pub enum Command {
     ClearApiKey(ProviderId),
     LoadApiKeyStatus(ProviderId),
     ListModels(ProviderId),
+    /// Asks for an inline completion at `cursor` (byte offset) of `text`. The use case refuses,
+    /// without contacting any provider, unless inline suggestions are enabled.
+    InlineSuggest {
+        id: AiId,
+        session: SessionId,
+        text: String,
+        cursor: usize,
+    },
+    /// Cancels a pending or running inline request (it became stale).
+    InlineCancel(AiId),
+    LoadInlineSettings,
+    SaveInlineSettings(InlineSettings),
 }
 
 /// Backend to UI.
@@ -164,4 +178,15 @@ pub enum Event {
     },
     /// Plain confirmation or failure of a settings action.
     Notice(Result<String, String>),
+    /// The inline completion as it grows.
+    InlineText {
+        id: AiId,
+        completion: InlineCompletion,
+    },
+    /// The inline request ended. `error` is `None` for success and for "suggestions are off".
+    InlineDone {
+        id: AiId,
+        error: Option<String>,
+    },
+    InlineSettings(Result<InlineSettings, String>),
 }

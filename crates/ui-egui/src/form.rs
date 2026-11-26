@@ -17,6 +17,8 @@ pub struct ConnectionForm {
     pub username: String,
     /// Per-connection read-only mode: only plain reads may run.
     pub read_only: bool,
+    /// Per-connection override of LLM inline suggestions: `None` follows the global setting.
+    pub inline_ai: Option<bool>,
     /// Entered text only; moved into a `SecretString` on submit and never stored in a profile.
     pub password: String,
 }
@@ -54,6 +56,7 @@ impl ConnectionForm {
             database: p.database.clone().unwrap_or_default(),
             username: p.username.clone(),
             read_only: p.read_only(),
+            inline_ai: p.inline_ai(),
             password: String::new(),
         }
     }
@@ -86,6 +89,7 @@ impl ConnectionForm {
         profile.database = Some(self.database.trim().to_owned()).filter(|d| !d.is_empty());
         profile.username = self.username.trim().to_owned();
         profile.set_read_only(self.read_only);
+        profile.set_inline_ai(self.inline_ai);
         Ok(profile)
     }
 
@@ -155,6 +159,20 @@ mod tests {
         assert!(ConnectionForm::from_profile(&p).read_only);
         f.read_only = false;
         assert!(!f.to_profile().expect("valid").read_only());
+    }
+
+    #[test]
+    fn the_inline_override_round_trips_and_defaults_to_the_global_setting() {
+        let mut f = ConnectionForm::new(None);
+        f.name = "n".into();
+        assert_eq!(f.inline_ai, None);
+        assert_eq!(f.to_profile().expect("valid").inline_ai(), None);
+        for choice in [Some(true), Some(false), None] {
+            f.inline_ai = choice;
+            let p = f.to_profile().expect("valid");
+            assert_eq!(p.inline_ai(), choice);
+            assert_eq!(ConnectionForm::from_profile(&p).inline_ai, choice);
+        }
     }
 
     #[test]

@@ -169,6 +169,20 @@ impl PromptBuilder {
         }
     }
 
+    /// Inline completion at the cursor. The model must reply with only the text to insert.
+    /// `prefix` and `suffix` are the editor text before and after the cursor (already limited
+    /// by the caller).
+    pub fn inline_sql(&self, ctx: &PromptContext<'_>, prefix: &str, suffix: &str) -> Prompt {
+        Prompt {
+            template: "inline_sql/v1",
+            system: system(
+                ctx,
+                "Task: complete the SQL the user is typing at the marker <CURSOR>. Reply with ONLY the text to insert at the marker: no explanation, no code fences, and do not repeat the text before the marker. Use only tables and columns from the schema. If you are not confident, reply with nothing.",
+            ),
+            messages: vec![ChatMessage::user(format!("{prefix}<CURSOR>{suffix}"))],
+        }
+    }
+
     /// Multi-turn chat about the schema. `history` is the conversation so far (user and
     /// assistant turns); the new `question` is appended as the final user message.
     pub fn chat(&self, ctx: &PromptContext<'_>, history: &[ChatMessage], question: &str) -> Prompt {

@@ -24,6 +24,8 @@ pub enum SuggestionKind {
     Column,
     /// A ready-made join condition such as `o.customer_id = c.id`.
     Join,
+    /// Free-form text from an LLM (inline suggestions).
+    Inline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

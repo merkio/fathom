@@ -528,3 +528,367 @@ fn read_only_connections_block_writes_before_the_database_and_allow_reads() {
     ));
     assert_eq!(driver.executed(), vec!["SELECT 1".to_string()]);
 }
+
+// ---- LLM inline suggestions, end to end --------------------------------------------------
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use application::usecases::InlineSettings;
+
+/// A provider that answers with one chunk and then hangs, counting its live streams so tests
+/// can prove that cancelling drops the stream (which is what closes the connection).
+struct CountingHang {
+    live: Arc<AtomicUsize>,
+}
+
+struct LiveGuard(Arc<AtomicUsize>);
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for CountingHang {
+    fn id(&self) -> domain::ProviderId {
+        domain::ProviderId::new("hang")
+    }
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, application::ports::LlmError> {
+        Ok(Vec::new())
+    }
+    async fn complete(&self, _: LlmRequest) -> Result<LlmResponse, application::ports::LlmError> {
+        std::future::pending().await
+    }
+    fn stream(
+        &self,
+        _: LlmRequest,
+    ) -> BoxStream<'static, Result<LlmChunk, application::ports::LlmError>> {
+        use futures::StreamExt;
+        self.live.fetch_add(1, Ordering::SeqCst);
+        let guard = LiveGuard(self.live.clone());
+        // The guard lives in the stream's state and drops with it.
+        stream::unfold((guard, false), |(guard, sent)| async move {
+            if sent {
+                std::future::pending::<()>().await;
+                None
+            } else {
+                Some((Ok(LlmChunk::Text("cust".into())), (guard, true)))
+            }
+        })
+        .boxed()
+    }
+}
+
+struct InlineEnv {
+    backend: Backend,
+    events: Receiver<Event>,
+    llm: FakeLlm,
+    live: Arc<AtomicUsize>,
+}
+
+fn inline_env(chunks: &[&str]) -> InlineEnv {
+    let mut customers = domain::Table::new("customers", domain::TableKind::Table);
+    customers.columns.push(domain::Column {
+        name: "id".into(),
+        data_type: domain::DataType::new("integer"),
+        nullable: false,
+        default: None,
+    });
+    let schema = SchemaTree {
+        catalogs: vec![domain::Catalog {
+            name: "d".into(),
+            schemas: vec![domain::Schema {
+                name: "public".into(),
+                tables: vec![customers],
+            }],
+        }],
+    };
+    let driver = FakeDriver::new("fake").with_schema(schema);
+    let mut drivers = DriverRegistry::new();
+    drivers.register(Arc::new(driver));
+    let llm = FakeLlm::new("fake", chunks);
+    let live = Arc::new(AtomicUsize::new(0));
+    let mut providers = LlmRegistry::new();
+    providers.register(Arc::new(llm.clone()));
+    providers.register(Arc::new(CountingHang { live: live.clone() }));
+    let use_cases = UseCases::new(
+        Ports {
+            connections: Arc::new(InMemoryConnections::default()),
+            history: Arc::new(InMemoryHistory::default()),
+            secrets: Arc::new(InMemorySecrets::default()),
+            clock: Arc::new(SystemClock),
+            drivers: Arc::new(drivers),
+            providers: Arc::new(providers),
+            settings: Arc::new(InMemorySettings::default()),
+        },
+        ExecuteOptions::default(),
+    );
+    let (backend, events) = Backend::spawn(Arc::new(use_cases), || {});
+    InlineEnv {
+        backend,
+        events,
+        llm,
+        live,
+    }
+}
+
+impl InlineEnv {
+    fn enable(&self, provider: &str) {
+        self.backend
+            .send(Command::SaveInlineSettings(InlineSettings {
+                enabled: true,
+                provider: Some(domain::ProviderId::new(provider)),
+                model: Some(domain::ModelId::new("m")),
+            }));
+    }
+
+    /// Saves a connection (optionally with an inline override), connects and loads its schema.
+    fn connect(&self, inline_override: Option<bool>) -> (SessionId, domain::ConnectionId) {
+        let mut profile = ConnectionProfile::new("c", DriverKind::new("fake"), "localhost");
+        profile.set_inline_ai(inline_override);
+        let id = profile.id;
+        self.backend.send(Command::SaveConnection {
+            profile,
+            password: None,
+        });
+        assert!(matches!(next(&self.events), Event::Saved(Ok(_))));
+        self.backend.send(Command::Connect(id));
+        let Event::Connected {
+            result: Ok(session),
+            ..
+        } = next(&self.events)
+        else {
+            panic!("connect")
+        };
+        self.backend.send(Command::LoadSchema(session));
+        assert!(matches!(
+            next(&self.events),
+            Event::Schema { result: Ok(_), .. }
+        ));
+        (session, id)
+    }
+
+    fn ask(&self, session: SessionId, id: u64) {
+        self.backend.send(Command::InlineSuggest {
+            id: AiId(id),
+            session,
+            text: "SELECT * FROM ".into(),
+            cursor: 14,
+        });
+    }
+}
+
+fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn inline_suggestions_are_off_by_default_and_nothing_reaches_the_provider() {
+    let e = inline_env(&["customers"]);
+    let (session, _) = e.connect(None);
+    e.ask(session, 1);
+    assert!(matches!(
+        next(&e.events),
+        Event::InlineDone {
+            id: AiId(1),
+            error: None
+        }
+    ));
+    assert!(e.llm.requests().is_empty(), "nothing was sent");
+}
+
+#[test]
+fn enabled_suggestions_stream_in_labelled_and_small() {
+    let e = inline_env(&["cust", "omers"]);
+    e.enable("fake");
+    let (session, _) = e.connect(None);
+    e.ask(session, 7);
+
+    let mut texts = Vec::new();
+    loop {
+        match next(&e.events) {
+            Event::InlineText { id, completion } => {
+                assert_eq!(id, AiId(7));
+                assert_eq!(completion.safety.map(|k| k.label()), Some("read"));
+                texts.push(completion.suggestion.text);
+            }
+            Event::InlineDone { id, error } => {
+                assert_eq!((id, error), (AiId(7), None));
+                break;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(texts, ["cust", "customers"]);
+    let sent = e.llm.requests().pop().expect("one request");
+    assert_eq!((sent.max_tokens, sent.temperature), (Some(64), Some(0.0)));
+    assert_eq!(sent.messages[0].content, "SELECT * FROM <CURSOR>");
+    assert!(
+        sent.system.expect("system").contains("public.customers("),
+        "the cached schema is used"
+    );
+}
+
+#[test]
+fn a_connection_that_opted_out_sends_nothing_even_when_the_global_switch_is_on() {
+    let e = inline_env(&["customers"]);
+    e.enable("fake");
+    let (session, _) = e.connect(Some(false));
+    e.ask(session, 1);
+    assert!(matches!(
+        next(&e.events),
+        Event::InlineDone { error: None, .. }
+    ));
+    assert!(e.llm.requests().is_empty());
+}
+
+#[test]
+fn a_connection_can_opt_in_while_the_global_switch_is_off() {
+    let e = inline_env(&["customers"]);
+    e.backend.send(Command::SaveInlineSettings(InlineSettings {
+        enabled: false,
+        provider: Some(domain::ProviderId::new("fake")),
+        model: Some(domain::ModelId::new("m")),
+    }));
+    let (session, _) = e.connect(Some(true));
+    e.ask(session, 1);
+    assert!(matches!(next(&e.events), Event::InlineText { .. }));
+    assert_eq!(e.llm.requests().len(), 1);
+}
+
+#[test]
+fn cancelling_a_stale_request_drops_the_provider_stream() {
+    let e = inline_env(&[]);
+    e.enable("hang");
+    let (session, _) = e.connect(None);
+    e.ask(session, 1);
+    assert!(matches!(
+        next(&e.events),
+        Event::InlineText { id: AiId(1), .. }
+    ));
+    assert_eq!(e.live.load(Ordering::SeqCst), 1, "the request is in flight");
+
+    e.backend.send(Command::InlineCancel(AiId(1)));
+    assert!(matches!(
+        next(&e.events),
+        Event::InlineDone {
+            id: AiId(1),
+            error: None
+        }
+    ));
+    wait_for("the stream to be dropped", || {
+        e.live.load(Ordering::SeqCst) == 0
+    });
+}
+
+#[test]
+fn a_new_request_after_a_cancel_works() {
+    let e = inline_env(&[]);
+    e.enable("hang");
+    let (session, _) = e.connect(None);
+    for id in 1..=3u64 {
+        e.ask(session, id);
+        assert!(matches!(next(&e.events), Event::InlineText { .. }));
+        e.backend.send(Command::InlineCancel(AiId(id)));
+        assert!(matches!(next(&e.events), Event::InlineDone { .. }));
+    }
+    wait_for("all streams to be dropped", || {
+        e.live.load(Ordering::SeqCst) == 0
+    });
+}
+
+#[test]
+fn unknown_sessions_and_missing_schemas_end_quietly_without_contacting_the_provider() {
+    let e = inline_env(&["x"]);
+    e.enable("fake");
+    e.ask(SessionId(99), 1);
+    assert!(matches!(
+        next(&e.events),
+        Event::InlineDone { error: None, .. }
+    ));
+
+    // Connected but the schema was never loaded: nothing useful to ask.
+    let profile = ConnectionProfile::new("c", DriverKind::new("fake"), "localhost");
+    let id = profile.id;
+    e.backend.send(Command::SaveConnection {
+        profile,
+        password: None,
+    });
+    assert!(matches!(next(&e.events), Event::Saved(Ok(_))));
+    e.backend.send(Command::Connect(id));
+    let Event::Connected {
+        result: Ok(session),
+        ..
+    } = next(&e.events)
+    else {
+        panic!("connect")
+    };
+    e.ask(session, 2);
+    assert!(matches!(
+        next(&e.events),
+        Event::InlineDone { error: None, .. }
+    ));
+    assert!(e.llm.requests().is_empty());
+}
+
+#[test]
+fn provider_failures_are_reported_in_the_done_event() {
+    let mut e = inline_env(&[]);
+    // Rebuild with a failing provider.
+    let failing = FakeLlm::new("fake", &[]).failing(application::ports::LlmError::RateLimited);
+    let mut providers = LlmRegistry::new();
+    providers.register(Arc::new(failing));
+    let mut drivers = DriverRegistry::new();
+    drivers.register(Arc::new(
+        FakeDriver::new("fake").with_schema(SchemaTree::default()),
+    ));
+    let use_cases = UseCases::new(
+        Ports {
+            connections: Arc::new(InMemoryConnections::default()),
+            history: Arc::new(InMemoryHistory::default()),
+            secrets: Arc::new(InMemorySecrets::default()),
+            clock: Arc::new(SystemClock),
+            drivers: Arc::new(drivers),
+            providers: Arc::new(providers),
+            settings: Arc::new(InMemorySettings::default()),
+        },
+        ExecuteOptions::default(),
+    );
+    let (backend, events) = Backend::spawn(Arc::new(use_cases), || {});
+    e.backend = backend;
+    e.events = events;
+    e.enable("fake");
+    let (session, _) = e.connect(None);
+    e.ask(session, 1);
+    let Event::InlineDone {
+        error: Some(message),
+        ..
+    } = next(&e.events)
+    else {
+        panic!("expected an error")
+    };
+    assert!(message.contains("rate limited"), "{message}");
+}
+
+#[test]
+fn inline_settings_round_trip_through_the_backend() {
+    let e = inline_env(&[]);
+    e.backend.send(Command::LoadInlineSettings);
+    assert!(
+        matches!(next(&e.events), Event::InlineSettings(Ok(s)) if s == InlineSettings::default())
+    );
+    e.enable("fake");
+    e.backend.send(Command::LoadInlineSettings);
+    let Event::InlineSettings(Ok(s)) = next(&e.events) else {
+        panic!("settings")
+    };
+    assert!(s.enabled && s.provider.as_ref().map(|p| p.as_str()) == Some("fake"));
+}

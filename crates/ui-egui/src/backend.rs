@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use application::ports::{DbSession, IntrospectScope, LlmChunk};
-use application::usecases::{AssistRequest, UseCases};
-use domain::{Dialect, QueryRequest};
+use application::usecases::{AssistRequest, InlineRequest, UseCases};
+use domain::{Dialect, QueryRequest, SchemaTree};
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -21,6 +21,10 @@ struct OpenSession {
     dialect: Dialect,
     /// Per-connection read-only mode: only plain reads may run.
     read_only: bool,
+    /// Per-connection override of inline suggestions.
+    inline_override: Option<bool>,
+    /// The latest loaded schema, so inline requests need not carry it.
+    schema: std::sync::Mutex<Option<Arc<SchemaTree>>>,
 }
 
 struct Shared {
@@ -144,6 +148,8 @@ async fn handle(sh: Arc<Shared>, command: Command) {
                         session,
                         dialect: uc.dialect_for(&profile.driver_kind),
                         read_only: profile.read_only(),
+                        inline_override: profile.inline_ai(),
+                        schema: std::sync::Mutex::new(None),
                     });
                     sh.sessions.lock().await.insert(id, open);
                     Ok(id)
@@ -167,11 +173,19 @@ async fn handle(sh: Arc<Shared>, command: Command) {
         }
         Command::LoadSchema(id) => {
             let result = match sh.session(id).await {
-                Ok(open) => uc
-                    .browse_schema
-                    .execute(open.session.as_ref(), IntrospectScope::All)
-                    .await
-                    .map_err(text),
+                Ok(open) => {
+                    let loaded = uc
+                        .browse_schema
+                        .execute(open.session.as_ref(), IntrospectScope::All)
+                        .await
+                        .map_err(text);
+                    if let Ok(tree) = &loaded
+                        && let Ok(mut cache) = open.schema.lock()
+                    {
+                        *cache = Some(Arc::new(tree.clone()));
+                    }
+                    loaded
+                }
                 Err(e) => Err(e),
             };
             sh.emit(Event::Schema {
@@ -257,6 +271,30 @@ async fn handle(sh: Arc<Shared>, command: Command) {
             let set = uc.api_keys.is_set(&provider).await.ok().flatten();
             sh.emit(Event::ApiKeyStatus { provider, set });
         }
+        Command::InlineSuggest {
+            id,
+            session,
+            text: editor,
+            cursor,
+        } => {
+            run_inline(&sh, id, session, editor, cursor).await;
+        }
+        Command::InlineCancel(id) => {
+            if let Some(stop) = sh.ai_stops.lock().await.remove(&id) {
+                let _ = stop.send(());
+            }
+        }
+        Command::LoadInlineSettings => {
+            let result = uc.suggest_inline.settings().load().await.map_err(text);
+            sh.emit(Event::InlineSettings(result));
+        }
+        Command::SaveInlineSettings(settings) => {
+            if let Err(e) = uc.suggest_inline.settings().save(&settings).await {
+                sh.emit(Event::Notice(Err(format!(
+                    "Could not save the inline settings: {e}"
+                ))));
+            }
+        }
         Command::ListModels(provider) => {
             let result = uc.list_models.execute(&provider).await.map_err(text);
             sh.emit(Event::Models { provider, result });
@@ -338,4 +376,62 @@ async fn run_ai(sh: &Arc<Shared>, ask: AiAsk) {
         }
     };
     sh.emit(Event::AiFinished { id, result });
+}
+
+/// Streams one inline completion. Cancelling (a newer keystroke made it stale) drops the stream,
+/// which closes the connection. When suggestions are off the use case refuses before any provider
+/// is contacted and this reports a quiet "done".
+async fn run_inline(sh: &Arc<Shared>, id: AiId, session: SessionId, editor: String, cursor: usize) {
+    let uc = &sh.use_cases;
+    let Ok(open) = sh.session(session).await else {
+        sh.emit(Event::InlineDone { id, error: None });
+        return;
+    };
+    let schema = open.schema.lock().ok().and_then(|g| g.clone());
+    let Some(schema) = schema else {
+        // No schema yet: nothing useful to ask.
+        sh.emit(Event::InlineDone { id, error: None });
+        return;
+    };
+    let request = InlineRequest {
+        dialect: &open.dialect,
+        schema: &schema,
+        text: &editor,
+        cursor,
+        connection_override: open.inline_override,
+    };
+    let mut stream = match uc.suggest_inline.start(&request).await {
+        Ok(s) => s,
+        Err(application::error::UseCaseError::Blocked(_)) => {
+            sh.emit(Event::InlineDone { id, error: None });
+            return;
+        }
+        Err(e) => {
+            sh.emit(Event::InlineDone {
+                id,
+                error: Some(text(e)),
+            });
+            return;
+        }
+    };
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    sh.ai_stops.lock().await.insert(id, stop_tx);
+
+    let mut failure = None;
+    loop {
+        tokio::select! {
+            item = stream.next() => match item {
+                Some(Ok(completion)) => sh.emit(Event::InlineText { id, completion }),
+                Some(Err(e)) => {
+                    failure = Some(text(e));
+                    break;
+                }
+                None => break,
+            },
+            _ = &mut stop_rx => break,
+        }
+    }
+    drop(stream);
+    sh.ai_stops.lock().await.remove(&id);
+    sh.emit(Event::InlineDone { id, error: failure });
 }
