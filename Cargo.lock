@@ -3426,6 +3426,13 @@ dependencies = [
 [[package]]
 name = "ui-egui"
 version = "0.1.0"
+dependencies = [
+ "application",
+ "domain",
+ "secrecy",
+ "test-support",
+ "tokio",
+]
 
 [[package]]
 name = "unicode-bidi"

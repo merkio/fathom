@@ -6,3 +6,12 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+domain = { path = "../domain" }
+application = { path = "../application" }
+secrecy = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+test-support = { path = "../test-support" }

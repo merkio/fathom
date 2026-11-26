@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)] // test helpers
+
 use std::sync::Arc;
 
 use application::error::UseCaseError;
