@@ -2,6 +2,7 @@
 name = "llm-ollama"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lints]

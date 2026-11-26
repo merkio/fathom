@@ -19,10 +19,6 @@ allow = [
     "CC0-1.0",
 ]
 
-# Workspace crates are `publish = false` and have no licence yet (PLAN.md open item 4).
-[licenses.private]
-ignore = true
-
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
