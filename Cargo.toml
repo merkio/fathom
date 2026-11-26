@@ -26,3 +26,8 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+
+[profile.release]
+# Smaller binaries for distribution; thin LTO keeps build times reasonable.
+lto = "thin"
+strip = true

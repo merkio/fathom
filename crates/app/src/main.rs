@@ -1,5 +1,8 @@
 //! Composition root: the only place that knows concrete adapter types.
 
+// A GUI program: no console window on Windows release builds.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod logging;
 
 use std::path::PathBuf;

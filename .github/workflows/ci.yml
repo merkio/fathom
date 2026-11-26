@@ -19,6 +19,21 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # Catches platform-specific build problems early. Informational until it has been seen green on
+  # all three systems; then remove `continue-on-error`.
+  cross-platform-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p app --locked
+
   postgres-integration:
     runs-on: ubuntu-latest
     services:

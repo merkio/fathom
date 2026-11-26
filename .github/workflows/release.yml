@@ -1,0 +1,67 @@
+name: Release
+
+# Builds the desktop app for Linux, macOS and Windows when a version tag is pushed, and attaches
+# the archives to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            binary: dbiever
+            archive: tar.gz
+          - os: macos-latest
+            name: macos-aarch64
+            binary: dbiever
+            archive: tar.gz
+          - os: windows-latest
+            name: windows-x86_64
+            binary: dbiever.exe
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p app --locked
+      - name: Package
+        shell: bash
+        run: |
+          NAME="dbiever-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir "$NAME"
+          cp "target/release/${{ matrix.binary }}" README.md "$NAME/"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "$NAME.zip" "$NAME"
+            echo "ASSET=$NAME.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "$NAME.tar.gz" "$NAME"
+            echo "ASSET=$NAME.tar.gz" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
