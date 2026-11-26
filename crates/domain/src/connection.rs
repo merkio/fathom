@@ -56,6 +56,9 @@ impl SecretRef {
     }
 }
 
+/// Option key for per-connection read-only mode.
+const READ_ONLY_OPTION: &str = "read_only";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionProfile {
     pub id: ConnectionId,
@@ -83,6 +86,22 @@ impl ConnectionProfile {
             username: String::new(),
             secret_ref: None,
             options: BTreeMap::new(),
+        }
+    }
+
+    /// Whether this connection only allows plain reads (the `read_only` option).
+    pub fn read_only(&self) -> bool {
+        self.options
+            .get(READ_ONLY_OPTION)
+            .is_some_and(|v| v == "true")
+    }
+
+    pub fn set_read_only(&mut self, read_only: bool) {
+        if read_only {
+            self.options
+                .insert(READ_ONLY_OPTION.to_owned(), "true".to_owned());
+        } else {
+            self.options.remove(READ_ONLY_OPTION);
         }
     }
 
@@ -145,6 +164,17 @@ mod tests {
             SecretRef::for_connection(id).as_str(),
             format!("connection/{}", id.0)
         );
+    }
+
+    #[test]
+    fn read_only_is_an_option_that_can_be_toggled() {
+        let mut p = profile();
+        assert!(!p.read_only());
+        p.set_read_only(true);
+        assert!(p.read_only());
+        assert_eq!(p.options.get("read_only").map(String::as_str), Some("true"));
+        p.set_read_only(false);
+        assert!(!p.read_only() && p.options.is_empty());
     }
 
     #[test]

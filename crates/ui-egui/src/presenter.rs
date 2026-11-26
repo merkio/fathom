@@ -5,10 +5,14 @@ use std::collections::HashSet;
 
 use application::ports::HistoryEntry;
 use application::sql::{CompletionRequest, Suggestion, changes_schema};
-use application::usecases::CompleteSql;
-use domain::{ConnectionId, ConnectionProfile, Dialect, DriverKind, QueryResult, SchemaTree};
+use application::usecases::{AiSettings, CompleteSql};
+use domain::{
+    ConnectionId, ConnectionProfile, Dialect, DriverKind, ModelId, ProviderId, QueryResult,
+    SchemaTree,
+};
 
-use crate::bridge::{Command, Event, SessionId, TabId};
+use crate::ai::{AiMode, AiRun, AiRunState, AiState, Followup};
+use crate::bridge::{AiAsk, AiTask, Command, Event, SessionId, TabId};
 use crate::form::ConnectionForm;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +72,16 @@ pub struct QueryTab {
     pub completion: CompletionState,
 }
 
+/// Which panel is shown on the right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightPanel {
+    History,
+    Ai,
+}
+
+/// At most this many result rows are ever shared with an AI provider, and only on request.
+const MAX_SHARED_ROWS: usize = 5;
+
 pub struct Presenter {
     pub connections: Vec<ConnectionProfile>,
     pub connecting: HashSet<ConnectionId>,
@@ -80,13 +94,25 @@ pub struct Presenter {
     pub form: Option<ConnectionForm>,
     pub testing: bool,
     pub status: Option<Status>,
+    pub right_panel: RightPanel,
+    pub ai: AiState,
     dialects: Vec<(DriverKind, Dialect)>,
     next_tab: u64,
     outbox: Vec<Command>,
 }
 
 impl Presenter {
-    pub fn new(dialects: Vec<(DriverKind, Dialect)>) -> Self {
+    pub fn new(
+        dialects: Vec<(DriverKind, Dialect)>,
+        llm_providers: Vec<(ProviderId, bool)>,
+    ) -> Self {
+        let mut outbox = vec![Command::LoadConnections, Command::LoadAiSettings];
+        outbox.extend(
+            llm_providers
+                .iter()
+                .filter(|(_, needs_key)| *needs_key)
+                .map(|(id, _)| Command::LoadApiKeyStatus(id.clone())),
+        );
         Self {
             connections: Vec::new(),
             connecting: HashSet::new(),
@@ -98,9 +124,11 @@ impl Presenter {
             form: None,
             testing: false,
             status: None,
+            right_panel: RightPanel::History,
+            ai: AiState::new(llm_providers),
             dialects,
             next_tab: 1,
-            outbox: vec![Command::LoadConnections],
+            outbox,
         }
     }
 
@@ -296,6 +324,233 @@ impl Presenter {
         }
     }
 
+    // --- AI assistant ---------------------------------------------------------------------
+
+    pub fn show_ai_panel(&mut self) {
+        self.right_panel = RightPanel::Ai;
+    }
+
+    /// Whether the connection runs in read-only mode.
+    pub fn is_read_only(&self, connection: ConnectionId) -> bool {
+        self.connections
+            .iter()
+            .find(|p| p.id == connection)
+            .is_some_and(ConnectionProfile::read_only)
+    }
+
+    pub fn ai_select_provider(&mut self, id: ProviderId) {
+        if self.ai.select_provider(id.clone()) {
+            self.outbox.push(Command::ListModels(id.clone()));
+            self.outbox.push(Command::LoadApiKeyStatus(id));
+            self.outbox
+                .push(Command::SaveAiSettings(self.ai.settings.clone()));
+        }
+    }
+
+    pub fn ai_select_model(&mut self, id: ModelId) {
+        self.ai.select_model(id);
+        self.outbox
+            .push(Command::SaveAiSettings(self.ai.settings.clone()));
+    }
+
+    pub fn ai_refresh_models(&mut self) {
+        if let Some(provider) = self.ai.settings.provider.clone() {
+            self.outbox.push(Command::ListModels(provider));
+        }
+    }
+
+    /// Sends the typed API key to the secret store and forgets it.
+    pub fn ai_save_key(&mut self) {
+        let Some(provider) = self.ai.settings.provider.clone() else {
+            return;
+        };
+        if self.ai.api_key_input.trim().is_empty() {
+            return;
+        }
+        let key = secrecy::SecretString::from(
+            std::mem::take(&mut self.ai.api_key_input).trim().to_owned(),
+        );
+        self.outbox.push(Command::SaveApiKey { provider, key });
+    }
+
+    pub fn ai_clear_key(&mut self) {
+        if let Some(provider) = self.ai.settings.provider.clone() {
+            self.outbox.push(Command::ClearApiKey(provider));
+        }
+    }
+
+    /// Builds the request for the selected tab. Everything that would leave the machine is
+    /// assembled here: the schema (metadata), the user's text, and result rows only if the user
+    /// ticked the box for this request.
+    fn build_ask(&mut self, mode: AiMode) -> Result<AiAsk, String> {
+        let (provider, model) = self.ai.ready()?;
+        let id = self.selected.ok_or("Open a query tab first.")?;
+        let tab = self
+            .tabs
+            .iter()
+            .find(|t| t.id == id)
+            .ok_or("Open a query tab first.")?;
+        let open = self
+            .open
+            .iter()
+            .find(|o| o.session == tab.session)
+            .ok_or("The connection of this tab is closed.")?;
+        let Load::Ready(schema) = &open.schema else {
+            return Err("The schema is still loading; try again in a moment.".into());
+        };
+        let editor = tab.text.trim();
+        let input = self.ai.input.trim();
+
+        let task = match mode {
+            AiMode::Generate => {
+                if input.is_empty() {
+                    return Err("Describe the query you want first.".into());
+                }
+                AiTask::Generate {
+                    question: input.to_owned(),
+                    current_sql: (!editor.is_empty()).then(|| editor.to_owned()),
+                }
+            }
+            AiMode::Explain | AiMode::Optimize => {
+                if editor.is_empty() {
+                    return Err("Write or paste some SQL in the editor first.".into());
+                }
+                if mode == AiMode::Explain {
+                    AiTask::Explain {
+                        sql: editor.to_owned(),
+                    }
+                } else {
+                    AiTask::Optimize {
+                        sql: editor.to_owned(),
+                    }
+                }
+            }
+            AiMode::Fix => {
+                let TabState::Failed(error) = &tab.state else {
+                    return Err("Nothing to fix: the last run of this tab did not fail.".into());
+                };
+                AiTask::Fix {
+                    sql: tab.executed.clone(),
+                    error: error.clone(),
+                }
+            }
+            AiMode::Chat => {
+                if input.is_empty() {
+                    return Err("Type a message first.".into());
+                }
+                AiTask::Chat {
+                    history: self.ai.chat.clone(),
+                    question: input.to_owned(),
+                }
+            }
+        };
+
+        // Row data is shared only on explicit, per-request opt-in, and only a few rows.
+        let sample_rows = match (&tab.state, self.ai.include_rows) {
+            (TabState::Done(result), true) if !result.columns.is_empty() => {
+                let mut sample = result.clone();
+                sample.rows.truncate(MAX_SHARED_ROWS);
+                Some(sample)
+            }
+            _ => None,
+        };
+
+        Ok(AiAsk {
+            id: self.ai.next_id(),
+            provider,
+            model,
+            dialect: open.dialect,
+            schema: schema.clone(),
+            task,
+            sample_rows,
+        })
+    }
+
+    /// Starts an AI request. Nothing is executed: the reply only ever lands in the AI panel,
+    /// and SQL reaches the editor when the user clicks "Insert".
+    pub fn ai_ask(&mut self, mode: AiMode) {
+        if self.ai.is_streaming() {
+            return;
+        }
+        match self.build_ask(mode) {
+            Ok(ask) => {
+                let prompt = match &ask.task {
+                    AiTask::Generate { question, .. } | AiTask::Chat { question, .. } => {
+                        question.clone()
+                    }
+                    AiTask::Explain { .. } => "Explain the SQL in the editor".to_owned(),
+                    AiTask::Optimize { .. } => "Optimize the SQL in the editor".to_owned(),
+                    AiTask::Fix { .. } => "Fix the failed query".to_owned(),
+                };
+                self.ai.begin(AiRun {
+                    id: ask.id,
+                    mode,
+                    prompt,
+                    text: String::new(),
+                    state: AiRunState::Streaming,
+                });
+                if mode.takes_input() {
+                    self.ai.input.clear();
+                }
+                // Sharing rows never carries over to the next request.
+                self.ai.include_rows = false;
+                self.right_panel = RightPanel::Ai;
+                self.outbox.push(Command::AiAsk(Box::new(ask)));
+            }
+            Err(message) => self.status = Some(Status::Error(message)),
+        }
+    }
+
+    /// Asks for the exact prompt a request would send, without sending it.
+    pub fn ai_preview(&mut self, mode: AiMode) {
+        match self.build_ask(mode) {
+            Ok(ask) => self.outbox.push(Command::AiPreview(Box::new(ask))),
+            Err(message) => self.status = Some(Status::Error(message)),
+        }
+    }
+
+    pub fn ai_stop(&mut self) {
+        if let Some(AiRun {
+            id,
+            state: AiRunState::Streaming,
+            ..
+        }) = &self.ai.run
+        {
+            self.outbox.push(Command::AiStop(*id));
+        }
+    }
+
+    /// One-click fix from a failed query.
+    pub fn ai_fix_last_error(&mut self) {
+        self.ai.mode = AiMode::Fix;
+        self.ai_ask(AiMode::Fix);
+    }
+
+    /// Puts the reply's SQL into the selected editor tab. It is never run automatically.
+    pub fn ai_insert_sql(&mut self, replace: bool) {
+        let Some(AiRun {
+            state: AiRunState::Done(reply),
+            ..
+        }) = &self.ai.run
+        else {
+            return;
+        };
+        let Some(sql) = reply.sql.clone() else { return };
+        let Some(id) = self.selected else { return };
+        if let Some(tab) = self.tab_mut(id) {
+            if replace || tab.text.trim().is_empty() {
+                tab.text = sql;
+            } else {
+                tab.text = format!("{}\n\n{sql}", tab.text.trim_end());
+            }
+            tab.completion = CompletionState::default();
+        }
+    }
+
+    pub fn ai_current_settings(&self) -> &AiSettings {
+        &self.ai.settings
+    }
+
     // --- autocomplete ---------------------------------------------------------------------
 
     /// Local completions for the tab's text at a byte offset. Empty until the schema is loaded.
@@ -410,6 +665,29 @@ impl Presenter {
 
     pub fn handle(&mut self, event: Event) {
         match event {
+            Event::Notice(Ok(message)) => self.status = Some(Status::Info(message)),
+            Event::Notice(Err(message)) => self.error(message),
+            e @ (Event::AiText { .. }
+            | Event::AiFinished { .. }
+            | Event::AiPreview(_)
+            | Event::AiSettings(_)
+            | Event::ApiKeyStatus { .. }
+            | Event::Models { .. }) => {
+                if let Event::AiFinished {
+                    result: Err(message),
+                    ..
+                } = &e
+                {
+                    self.status = Some(Status::Error(format!("AI request failed: {message}")));
+                }
+                for follow in self.ai.handle(e) {
+                    match follow {
+                        Followup::ListModels(provider) => {
+                            self.outbox.push(Command::ListModels(provider))
+                        }
+                    }
+                }
+            }
             Event::Connections(Ok(list)) => self.connections = list,
             Event::Connections(Err(e)) => self.error(format!("Could not load connections: {e}")),
             Event::Saved(Ok(profile)) => {
@@ -540,10 +818,10 @@ mod tests {
     use super::*;
 
     fn presenter() -> Presenter {
-        let mut p = Presenter::new(vec![(DriverKind::new("postgres"), Dialect::ANSI)]);
+        let mut p = Presenter::new(vec![(DriverKind::new("postgres"), Dialect::ANSI)], vec![]);
         assert!(matches!(
             p.take_commands().as_slice(),
-            [Command::LoadConnections]
+            [Command::LoadConnections, Command::LoadAiSettings]
         ));
         p
     }
@@ -938,7 +1216,7 @@ mod tests {
     fn dialect_follows_the_connections_driver() {
         let mut dialect = Dialect::ANSI;
         dialect.name = "special";
-        let mut p = Presenter::new(vec![(DriverKind::new("postgres"), dialect)]);
+        let mut p = Presenter::new(vec![(DriverKind::new("postgres"), dialect)], vec![]);
         let profile = profile();
         let id = profile.id;
         p.handle(Event::Connections(Ok(vec![profile])));
@@ -1006,5 +1284,509 @@ mod tests {
             "reset on change"
         );
         p.move_selection(tab, 1, 0); // empty list: no panic
+    }
+
+    // ---- AI assistant -----------------------------------------------------------------
+
+    use crate::ai::{AiMode, AiRunState, ModelsState};
+    use application::ports::ModelInfo;
+    use application::usecases::AssistReply;
+
+    fn fake_providers() -> Vec<(ProviderId, bool)> {
+        vec![
+            (ProviderId::new("local"), false),
+            (ProviderId::new("cloud"), true),
+        ]
+    }
+
+    /// Connected, schema loaded, provider `local` and model `m` chosen.
+    fn ai_ready() -> (Presenter, TabId) {
+        let mut p = Presenter::new(
+            vec![(DriverKind::new("postgres"), Dialect::ANSI)],
+            fake_providers(),
+        );
+        p.take_commands();
+        let profile = profile();
+        let id = profile.id;
+        p.handle(Event::Connections(Ok(vec![profile])));
+        p.connect(id);
+        p.handle(Event::Connected {
+            connection: id,
+            result: Ok(SessionId(1)),
+        });
+        p.handle(Event::Schema {
+            session: SessionId(1),
+            result: Ok(schema()),
+        });
+        p.handle(Event::AiSettings(Ok(AiSettings {
+            provider: Some(ProviderId::new("local")),
+            model: Some(ModelId::new("m")),
+        })));
+        let tab = p.selected.expect("tab");
+        p.take_commands();
+        (p, tab)
+    }
+
+    fn only_ask(p: &mut Presenter) -> AiAsk {
+        let mut cmds = p.take_commands();
+        assert_eq!(cmds.len(), 1, "{cmds:?}");
+        match cmds.remove(0) {
+            Command::AiAsk(ask) => *ask,
+            other => panic!("expected AiAsk, got {other:?}"),
+        }
+    }
+
+    fn rows(n: usize) -> QueryResult {
+        QueryResult {
+            columns: vec![domain::ResultColumn {
+                name: "name".into(),
+                data_type: domain::DataType::new("text"),
+            }],
+            rows: (0..n)
+                .map(|i| vec![domain::Value::Text(format!("secret-{i}"))])
+                .collect(),
+            ..QueryResult::empty()
+        }
+    }
+
+    fn reply(text: &str, sql: Option<&str>) -> AssistReply {
+        AssistReply {
+            text: text.into(),
+            sql: sql.map(str::to_owned),
+            explanation: String::new(),
+            safety: None,
+            warning: None,
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn startup_loads_ai_settings_and_key_status_only_for_keyed_providers() {
+        let mut p = Presenter::new(vec![], fake_providers());
+        let cmds = p.take_commands();
+        assert!(
+            matches!(cmds[0], Command::LoadConnections)
+                && matches!(cmds[1], Command::LoadAiSettings)
+        );
+        assert!(matches!(&cmds[2], Command::LoadApiKeyStatus(id) if id.as_str() == "cloud"));
+        assert_eq!(cmds.len(), 3);
+    }
+
+    #[test]
+    fn saved_settings_trigger_a_model_listing() {
+        let (mut p, _) = ai_ready();
+        p.handle(Event::AiSettings(Ok(AiSettings {
+            provider: Some(ProviderId::new("local")),
+            model: Some(ModelId::new("m")),
+        })));
+        assert!(
+            matches!(p.take_commands().as_slice(), [Command::ListModels(id)] if id.as_str() == "local")
+        );
+        // A provider that is no longer registered is ignored instead of selected.
+        p.handle(Event::AiSettings(Ok(AiSettings {
+            provider: Some(ProviderId::new("gone")),
+            model: None,
+        })));
+        assert_eq!(p.ai.settings.provider, Some(ProviderId::new("local")));
+    }
+
+    #[test]
+    fn asking_needs_a_provider_a_model_and_a_key() {
+        let mut p = Presenter::new(
+            vec![(DriverKind::new("postgres"), Dialect::ANSI)],
+            fake_providers(),
+        );
+        p.take_commands();
+        p.ai.input = "list customers".into();
+        p.ai_ask(AiMode::Generate);
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("provider")));
+        assert!(p.take_commands().is_empty());
+
+        p.ai_select_provider(ProviderId::new("cloud"));
+        p.take_commands();
+        p.ai_ask(AiMode::Generate);
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("model")));
+        p.ai_select_model(ModelId::new("big"));
+        p.take_commands();
+        p.ai_ask(AiMode::Generate);
+        assert!(
+            matches!(&p.status, Some(Status::Error(m)) if m.contains("API key")),
+            "{:?}",
+            p.status
+        );
+        assert!(p.take_commands().is_empty());
+    }
+
+    #[test]
+    fn generate_sends_schema_and_question_but_no_rows_by_default() {
+        let (mut p, tab) = ai_ready();
+        p.tab_mut(tab).expect("tab").state = TabState::Done(rows(20));
+        p.ai.input = "list customers".into();
+        p.ai_ask(AiMode::Generate);
+
+        let ask = only_ask(&mut p);
+        assert_eq!((ask.provider.as_str(), ask.model.as_str()), ("local", "m"));
+        assert!(
+            matches!(&ask.task, AiTask::Generate { question, current_sql: None } if question == "list customers")
+        );
+        assert_eq!(ask.schema.tables().count(), 1);
+        assert!(ask.sample_rows.is_none(), "rows are opt-in");
+        assert!(p.ai.is_streaming());
+        assert_eq!(p.right_panel, RightPanel::Ai);
+        assert!(p.ai.input.is_empty(), "the question is consumed");
+    }
+
+    #[test]
+    fn sample_rows_are_shared_only_when_ticked_limited_and_for_one_request_only() {
+        let (mut p, tab) = ai_ready();
+        p.tab_mut(tab).expect("tab").state = TabState::Done(rows(20));
+        p.ai.input = "q".into();
+        p.ai.include_rows = true;
+        p.ai_ask(AiMode::Generate);
+        let ask = only_ask(&mut p);
+        assert_eq!(ask.sample_rows.expect("rows").rows.len(), 5);
+        assert!(!p.ai.include_rows, "the opt-in does not carry over");
+
+        p.handle(Event::AiFinished {
+            id: ask.id,
+            result: Ok(reply("x", None)),
+        });
+        p.ai.input = "again".into();
+        p.ai_ask(AiMode::Generate);
+        assert!(only_ask(&mut p).sample_rows.is_none());
+    }
+
+    #[test]
+    fn ticking_the_box_without_a_result_sends_no_rows() {
+        let (mut p, _) = ai_ready();
+        p.ai.input = "q".into();
+        p.ai.include_rows = true;
+        p.ai_ask(AiMode::Generate);
+        assert!(only_ask(&mut p).sample_rows.is_none());
+    }
+
+    #[test]
+    fn the_editor_sql_travels_with_generate_and_is_required_for_explain_and_optimize() {
+        let (mut p, tab) = ai_ready();
+        p.ai_ask(AiMode::Explain);
+        assert!(matches!(p.status, Some(Status::Error(_))));
+        assert!(p.take_commands().is_empty());
+
+        p.tab_mut(tab).expect("tab").text = "select 1".into();
+        p.ai_ask(AiMode::Explain);
+        assert!(matches!(only_ask(&mut p).task, AiTask::Explain { sql } if sql == "select 1"));
+        p.handle(Event::AiFinished {
+            id: crate::bridge::AiId(1),
+            result: Ok(reply("x", None)),
+        });
+        p.ai_ask(AiMode::Optimize);
+        assert!(matches!(only_ask(&mut p).task, AiTask::Optimize { .. }));
+        p.handle(Event::AiFinished {
+            id: crate::bridge::AiId(2),
+            result: Ok(reply("x", None)),
+        });
+
+        p.ai.input = "only top 3".into();
+        p.ai_ask(AiMode::Generate);
+        assert!(
+            matches!(only_ask(&mut p).task, AiTask::Generate { current_sql: Some(s), .. } if s == "select 1")
+        );
+    }
+
+    #[test]
+    fn fix_uses_the_statement_that_failed_not_the_edited_text() {
+        let (mut p, tab) = ai_ready();
+        p.ai_fix_last_error();
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("Nothing to fix")));
+
+        p.tab_mut(tab).expect("tab").text = "SELECT nam FROM customers".into();
+        p.run(tab);
+        p.take_commands();
+        p.handle(Event::QueryFinished {
+            tab,
+            result: Err("column nam does not exist".into()),
+        });
+        p.take_commands();
+        p.tab_mut(tab).expect("tab").text = "something else now".into();
+
+        p.ai_fix_last_error();
+        let ask = only_ask(&mut p);
+        assert!(matches!(&ask.task, AiTask::Fix { sql, error }
+            if sql == "SELECT nam FROM customers" && error == "column nam does not exist"));
+    }
+
+    #[test]
+    fn replies_stream_in_and_stale_events_are_ignored() {
+        let (mut p, _) = ai_ready();
+        p.ai.input = "q".into();
+        p.ai_ask(AiMode::Generate);
+        let id = only_ask(&mut p).id;
+
+        p.handle(Event::AiText {
+            id,
+            text: "SELECT ".into(),
+        });
+        p.handle(Event::AiText {
+            id,
+            text: "1".into(),
+        });
+        p.handle(Event::AiText {
+            id: crate::bridge::AiId(999),
+            text: "NOISE".into(),
+        });
+        assert_eq!(p.ai.run.as_ref().map(|r| r.text.as_str()), Some("SELECT 1"));
+
+        p.handle(Event::AiFinished {
+            id: crate::bridge::AiId(999),
+            result: Err("stale".into()),
+        });
+        assert!(
+            p.ai.is_streaming(),
+            "an old request cannot end the current one"
+        );
+        p.handle(Event::AiFinished {
+            id,
+            result: Ok(reply("SELECT 1", Some("SELECT 1"))),
+        });
+        assert!(!p.ai.is_streaming());
+        assert!(matches!(
+            p.ai.run.as_ref().map(|r| &r.state),
+            Some(AiRunState::Done(_))
+        ));
+    }
+
+    #[test]
+    fn a_second_ask_while_streaming_is_ignored_and_stop_only_works_while_streaming() {
+        let (mut p, _) = ai_ready();
+        p.ai_stop();
+        assert!(p.take_commands().is_empty());
+        p.ai.input = "q".into();
+        p.ai_ask(AiMode::Generate);
+        let id = only_ask(&mut p).id;
+        p.ai.input = "another".into();
+        p.ai_ask(AiMode::Generate);
+        assert!(p.take_commands().is_empty());
+        p.ai_stop();
+        assert!(matches!(p.take_commands().as_slice(), [Command::AiStop(i)] if *i == id));
+    }
+
+    #[test]
+    fn failures_are_reported_and_keep_the_streamed_text() {
+        let (mut p, _) = ai_ready();
+        p.ai.input = "q".into();
+        p.ai_ask(AiMode::Generate);
+        let id = only_ask(&mut p).id;
+        p.handle(Event::AiText {
+            id,
+            text: "partial".into(),
+        });
+        p.handle(Event::AiFinished {
+            id,
+            result: Err("rate limited".into()),
+        });
+        let run = p.ai.run.as_ref().expect("run");
+        assert_eq!(run.text, "partial");
+        assert!(matches!(&run.state, AiRunState::Failed(m) if m == "rate limited"));
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("rate limited")));
+    }
+
+    #[test]
+    fn inserting_sql_never_executes_it() {
+        let (mut p, tab) = ai_ready();
+        p.ai.input = "q".into();
+        p.ai_ask(AiMode::Generate);
+        let id = only_ask(&mut p).id;
+        p.handle(Event::AiFinished {
+            id,
+            result: Ok(reply("```sql\nDELETE FROM t\n```", Some("DELETE FROM t"))),
+        });
+
+        p.ai_insert_sql(false);
+        assert_eq!(
+            p.selected_tab().map(|t| t.text.as_str()),
+            Some("DELETE FROM t")
+        );
+        p.tab_mut(tab).expect("tab").text = "select 1".into();
+        p.ai_insert_sql(false);
+        assert_eq!(
+            p.selected_tab().map(|t| t.text.as_str()),
+            Some("select 1\n\nDELETE FROM t"),
+            "appended"
+        );
+        p.ai_insert_sql(true);
+        assert_eq!(
+            p.selected_tab().map(|t| t.text.as_str()),
+            Some("DELETE FROM t"),
+            "replaced"
+        );
+
+        let cmds = p.take_commands();
+        assert!(
+            !cmds.iter().any(|c| matches!(c, Command::Execute { .. })),
+            "{cmds:?}"
+        );
+        assert!(matches!(
+            p.selected_tab().map(|t| &t.state),
+            Some(TabState::Idle)
+        ));
+    }
+
+    #[test]
+    fn inserting_does_nothing_without_sql_in_the_reply() {
+        let (mut p, tab) = ai_ready();
+        p.tab_mut(tab).expect("tab").text = "keep".into();
+        p.ai.input = "q".into();
+        p.ai_ask(AiMode::Generate);
+        let id = only_ask(&mut p).id;
+        p.handle(Event::AiFinished {
+            id,
+            result: Ok(reply("just words", None)),
+        });
+        p.ai_insert_sql(true);
+        assert_eq!(p.selected_tab().map(|t| t.text.as_str()), Some("keep"));
+    }
+
+    #[test]
+    fn chat_keeps_history_across_turns_and_can_be_cleared() {
+        let (mut p, _) = ai_ready();
+        p.ai.input = "what tables exist?".into();
+        p.ai_ask(AiMode::Chat);
+        let first = only_ask(&mut p);
+        assert!(matches!(&first.task, AiTask::Chat { history, .. } if history.is_empty()));
+        p.handle(Event::AiFinished {
+            id: first.id,
+            result: Ok(reply("customers", None)),
+        });
+        assert_eq!(p.ai.chat.len(), 2);
+
+        p.ai.input = "and columns?".into();
+        p.ai_ask(AiMode::Chat);
+        let second = only_ask(&mut p);
+        assert!(matches!(&second.task, AiTask::Chat { history, question }
+            if history.len() == 2 && question == "and columns?"));
+        p.handle(Event::AiFinished {
+            id: second.id,
+            result: Ok(reply("id, name", None)),
+        });
+        assert_eq!(p.ai.chat.len(), 4);
+        p.ai.clear_chat();
+        assert!(p.ai.chat.is_empty());
+    }
+
+    #[test]
+    fn non_chat_replies_do_not_enter_the_chat_history() {
+        let (mut p, _) = ai_ready();
+        p.ai.input = "q".into();
+        p.ai_ask(AiMode::Generate);
+        let id = only_ask(&mut p).id;
+        p.handle(Event::AiFinished {
+            id,
+            result: Ok(reply("x", None)),
+        });
+        assert!(p.ai.chat.is_empty());
+    }
+
+    #[test]
+    fn preview_builds_the_same_request_without_starting_a_run() {
+        let (mut p, tab) = ai_ready();
+        p.tab_mut(tab).expect("tab").text = "select 1".into();
+        p.ai_preview(AiMode::Explain);
+        assert!(matches!(
+            p.take_commands().as_slice(),
+            [Command::AiPreview(_)]
+        ));
+        assert!(!p.ai.is_streaming() && p.ai.run.is_none());
+    }
+
+    #[test]
+    fn choosing_a_provider_resets_the_model_lists_models_and_saves() {
+        let (mut p, _) = ai_ready();
+        p.ai_select_provider(ProviderId::new("cloud"));
+        assert_eq!(p.ai.settings.model, None);
+        assert!(matches!(
+            p.ai.provider(&ProviderId::new("cloud")).map(|s| &s.models),
+            Some(ModelsState::Loading)
+        ));
+        let cmds = p.take_commands();
+        assert!(matches!(cmds[0], Command::ListModels(_)));
+        assert!(matches!(cmds[1], Command::LoadApiKeyStatus(_)));
+        assert!(
+            matches!(&cmds[2], Command::SaveAiSettings(s) if s.provider == Some(ProviderId::new("cloud")) && s.model.is_none())
+        );
+        p.ai_select_provider(ProviderId::new("cloud")); // same again: nothing to do
+        assert!(p.take_commands().is_empty());
+
+        p.handle(Event::Models {
+            provider: ProviderId::new("cloud"),
+            result: Ok(vec![ModelInfo {
+                id: ModelId::new("big"),
+                display_name: "Big".into(),
+            }]),
+        });
+        assert!(
+            matches!(p.ai.provider(&ProviderId::new("cloud")).map(|s| &s.models), Some(ModelsState::Ready(m)) if m.len() == 1)
+        );
+        p.ai_select_model(ModelId::new("big"));
+        assert!(
+            matches!(&p.take_commands()[0], Command::SaveAiSettings(s) if s.model == Some(ModelId::new("big")))
+        );
+    }
+
+    #[test]
+    fn the_api_key_leaves_the_ui_state_the_moment_it_is_saved() {
+        let (mut p, _) = ai_ready();
+        p.ai_select_provider(ProviderId::new("cloud"));
+        p.take_commands();
+        p.ai.api_key_input = "   ".into();
+        p.ai_save_key();
+        assert!(p.take_commands().is_empty(), "blank input is ignored");
+
+        p.ai.api_key_input = " sk-secret ".into();
+        p.ai_save_key();
+        assert!(p.ai.api_key_input.is_empty());
+        let cmds = p.take_commands();
+        assert!(
+            matches!(&cmds[0], Command::SaveApiKey { provider, .. } if provider.as_str() == "cloud")
+        );
+        assert!(
+            !format!("{cmds:?}").contains("sk-secret"),
+            "commands never print the key"
+        );
+
+        p.handle(Event::ApiKeyStatus {
+            provider: ProviderId::new("cloud"),
+            set: Some(true),
+        });
+        assert_eq!(
+            p.ai.provider(&ProviderId::new("cloud"))
+                .and_then(|s| s.key_set),
+            Some(true)
+        );
+        p.ai_clear_key();
+        assert!(matches!(
+            p.take_commands().as_slice(),
+            [Command::ClearApiKey(_)]
+        ));
+    }
+
+    #[test]
+    fn notices_reach_the_status_bar() {
+        let (mut p, _) = ai_ready();
+        p.handle(Event::Notice(Ok("saved".into())));
+        assert_eq!(p.status, Some(Status::Info("saved".into())));
+        p.handle(Event::Notice(Err("nope".into())));
+        assert!(matches!(p.status, Some(Status::Error(m)) if m == "nope"));
+    }
+
+    #[test]
+    fn read_only_follows_the_connection_profile() {
+        let mut p = Presenter::new(vec![], vec![]);
+        let mut ro = profile();
+        ro.set_read_only(true);
+        let rw = profile();
+        let (ro_id, rw_id) = (ro.id, rw.id);
+        p.handle(Event::Connections(Ok(vec![ro, rw])));
+        assert!(p.is_read_only(ro_id) && !p.is_read_only(rw_id));
+        assert!(!p.is_read_only(ConnectionId::new()));
     }
 }

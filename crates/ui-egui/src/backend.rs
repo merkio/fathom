@@ -6,22 +6,28 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use application::ports::{DbSession, IntrospectScope};
-use application::usecases::UseCases;
-use domain::QueryRequest;
-use tokio::sync::{Mutex, mpsc};
+use application::ports::{DbSession, IntrospectScope, LlmChunk};
+use application::usecases::{AssistRequest, UseCases};
+use domain::{Dialect, QueryRequest};
+use futures::StreamExt;
+use tokio::sync::{Mutex, mpsc, oneshot};
 
-use crate::bridge::{Command, Event, SessionId};
+use crate::bridge::{AiAsk, AiId, Command, Event, SessionId};
 
 const HISTORY_LIMIT: usize = 200;
 
 struct OpenSession {
     session: Box<dyn DbSession>,
+    dialect: Dialect,
+    /// Per-connection read-only mode: only plain reads may run.
+    read_only: bool,
 }
 
 struct Shared {
     use_cases: Arc<UseCases>,
     sessions: Mutex<HashMap<SessionId, Arc<OpenSession>>>,
+    /// Running AI requests, each with the channel that stops it.
+    ai_stops: Mutex<HashMap<AiId, oneshot::Sender<()>>>,
     next_session: AtomicU64,
     events: Sender<Event>,
     notify: Box<dyn Fn() + Send + Sync>,
@@ -61,6 +67,7 @@ impl Backend {
         let shared = Arc::new(Shared {
             use_cases,
             sessions: Mutex::new(HashMap::new()),
+            ai_stops: Mutex::new(HashMap::new()),
             next_session: AtomicU64::new(1),
             events,
             notify: Box::new(notify),
@@ -130,10 +137,14 @@ async fn handle(sh: Arc<Shared>, command: Command) {
             sh.emit(Event::TestFinished(result));
         }
         Command::Connect(connection) => {
-            let result = match uc.open_session.execute(connection).await {
-                Ok(session) => {
+            let result = match uc.open_session.execute_with_profile(connection).await {
+                Ok((profile, session)) => {
                     let id = SessionId(sh.next_session.fetch_add(1, Ordering::Relaxed));
-                    let open = Arc::new(OpenSession { session });
+                    let open = Arc::new(OpenSession {
+                        session,
+                        dialect: uc.dialect_for(&profile.driver_kind),
+                        read_only: profile.read_only(),
+                    });
                     sh.sessions.lock().await.insert(id, open);
                     Ok(id)
                 }
@@ -177,7 +188,13 @@ async fn handle(sh: Arc<Shared>, command: Command) {
             let result = match sh.session(session).await {
                 Ok(open) => uc
                     .execute_query
-                    .execute(connection, open.session.as_ref(), QueryRequest::sql(sql))
+                    .execute_guarded(
+                        connection,
+                        open.session.as_ref(),
+                        QueryRequest::sql(sql),
+                        &open.dialect,
+                        open.read_only,
+                    )
                     .await
                     .map_err(text),
                 Err(e) => Err(e),
@@ -197,5 +214,128 @@ async fn handle(sh: Arc<Shared>, command: Command) {
                 .map_err(text);
             sh.emit(Event::History { connection, result });
         }
+        Command::AiAsk(ask) => run_ai(&sh, *ask).await,
+        Command::AiStop(id) => {
+            if let Some(stop) = sh.ai_stops.lock().await.remove(&id) {
+                let _ = stop.send(());
+            }
+        }
+        Command::AiPreview(ask) => {
+            let req = assist_request(&ask);
+            sh.emit(Event::AiPreview(uc.assistant.preview(&req)));
+        }
+        Command::LoadAiSettings => {
+            let result = uc.ai_settings.load().await.map_err(text);
+            sh.emit(Event::AiSettings(result));
+        }
+        Command::SaveAiSettings(settings) => {
+            if let Err(e) = uc.ai_settings.save(&settings).await {
+                sh.emit(Event::Notice(Err(format!(
+                    "Could not save AI settings: {e}"
+                ))));
+            }
+        }
+        Command::SaveApiKey { provider, key } => {
+            let result = match uc.api_keys.save(&provider, key).await {
+                Ok(()) => Ok(format!("API key for {} saved", provider.as_str())),
+                Err(e) => Err(format!("Could not save the API key: {e}")),
+            };
+            sh.emit(Event::Notice(result));
+            let set = uc.api_keys.is_set(&provider).await.ok().flatten();
+            sh.emit(Event::ApiKeyStatus { provider, set });
+        }
+        Command::ClearApiKey(provider) => {
+            let result = match uc.api_keys.clear(&provider).await {
+                Ok(()) => Ok(format!("API key for {} removed", provider.as_str())),
+                Err(e) => Err(format!("Could not remove the API key: {e}")),
+            };
+            sh.emit(Event::Notice(result));
+            let set = uc.api_keys.is_set(&provider).await.ok().flatten();
+            sh.emit(Event::ApiKeyStatus { provider, set });
+        }
+        Command::LoadApiKeyStatus(provider) => {
+            let set = uc.api_keys.is_set(&provider).await.ok().flatten();
+            sh.emit(Event::ApiKeyStatus { provider, set });
+        }
+        Command::ListModels(provider) => {
+            let result = uc.list_models.execute(&provider).await.map_err(text);
+            sh.emit(Event::Models { provider, result });
+        }
     }
+}
+
+fn assist_request(ask: &AiAsk) -> AssistRequest<'_> {
+    AssistRequest {
+        provider: ask.provider.clone(),
+        model: ask.model.clone(),
+        dialect: &ask.dialect,
+        schema: &ask.schema,
+        task: ask.task.as_task(),
+        sample_rows: ask.sample_rows.as_ref(),
+        max_tokens: None,
+    }
+}
+
+/// Streams one AI reply, forwarding text as it arrives. The reply is parsed and classified when
+/// the stream ends, or when the user stops it. Nothing here runs SQL.
+async fn run_ai(sh: &Arc<Shared>, ask: AiAsk) {
+    let uc = &sh.use_cases;
+    let id = ask.id;
+    let req = assist_request(&ask);
+    let mut stream = match uc.assistant.stream(&req) {
+        Ok(s) => s,
+        Err(e) => {
+            sh.emit(Event::AiFinished {
+                id,
+                result: Err(text(e)),
+            });
+            return;
+        }
+    };
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    sh.ai_stops.lock().await.insert(id, stop_tx);
+
+    let mut reply = String::new();
+    let mut usage = None;
+    let mut stopped = false;
+    let mut failure = None;
+    loop {
+        tokio::select! {
+            chunk = stream.next() => match chunk {
+                Some(Ok(LlmChunk::Text(t))) => {
+                    reply.push_str(&t);
+                    sh.emit(Event::AiText { id, text: t });
+                }
+                Some(Ok(LlmChunk::Usage(u))) => usage = Some(u),
+                Some(Ok(LlmChunk::Done)) | None => break,
+                Some(Err(e)) => {
+                    failure = Some(text(e));
+                    break;
+                }
+            },
+            _ = &mut stop_rx => {
+                stopped = true;
+                break;
+            }
+        }
+    }
+    // Dropping the stream closes the connection, which cancels the request.
+    drop(stream);
+    sh.ai_stops.lock().await.remove(&id);
+
+    let result = match failure {
+        Some(e) => Err(e),
+        None => {
+            let mut finished = uc.assistant.finish(&reply, &ask.dialect, usage);
+            if stopped {
+                let note = "Stopped by you; the reply is incomplete.";
+                finished.warning = Some(match finished.warning.take() {
+                    Some(w) => format!("{note} {w}"),
+                    None => note.to_owned(),
+                });
+            }
+            Ok(finished)
+        }
+    };
+    sh.emit(Event::AiFinished { id, result });
 }

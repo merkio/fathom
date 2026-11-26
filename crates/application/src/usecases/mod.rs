@@ -1,11 +1,13 @@
 //! Use cases. Each is a small struct holding the ports it needs.
 
+pub mod ai;
 pub mod assistant;
 pub mod autocomplete;
 pub mod bundle;
 pub mod connections;
 pub mod data;
 
+pub use ai::{AiSettings, AiSettingsStore, ApiKeys, ListModels};
 pub use assistant::{AssistReply, AssistRequest, AssistTask, Assistant, PromptPreview};
 pub use autocomplete::CompleteSql;
 pub use bundle::{Ports, UseCases};

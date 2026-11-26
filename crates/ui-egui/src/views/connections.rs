@@ -27,7 +27,12 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
             for c in &p.connections {
                 ui.horizontal(|ui| {
                     let connecting = p.connecting.contains(&c.id);
-                    ui.label(&c.name).on_hover_text(format!(
+                    let label = if c.read_only() {
+                        format!("{} (read-only)", c.name)
+                    } else {
+                        c.name.clone()
+                    };
+                    ui.label(label).on_hover_text(format!(
                         "{} {}:{}",
                         c.driver_kind.as_str(),
                         c.host,
@@ -116,6 +121,13 @@ pub fn show_form(ctx: &egui::Context, p: &mut Presenter) {
 
                         ui.label("User");
                         ui.text_edit_singleline(&mut form.username);
+                        ui.end_row();
+
+                        ui.label("Read-only");
+                        ui.checkbox(
+                            &mut form.read_only,
+                            "Only allow plain reads (blocks writes and DDL)",
+                        );
                         ui.end_row();
 
                         ui.label("Password");

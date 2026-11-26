@@ -143,12 +143,22 @@ impl OpenSession {
     }
 
     pub async fn execute(&self, id: ConnectionId) -> Result<Box<dyn DbSession>, UseCaseError> {
+        Ok(self.execute_with_profile(id).await?.1)
+    }
+
+    /// Opens the session and also returns the profile it was opened from, so callers can apply
+    /// per-connection settings such as read-only mode.
+    pub async fn execute_with_profile(
+        &self,
+        id: ConnectionId,
+    ) -> Result<(ConnectionProfile, Box<dyn DbSession>), UseCaseError> {
         let profile = match self.repo.get(id).await {
             Ok(p) => p,
             Err(StorageError::NotFound) => return Err(UseCaseError::ConnectionNotFound(id)),
             Err(e) => return Err(e.into()),
         };
-        connect(&self.drivers, self.secrets.as_ref(), &profile, None).await
+        let session = connect(&self.drivers, self.secrets.as_ref(), &profile, None).await?;
+        Ok((profile, session))
     }
 }
 

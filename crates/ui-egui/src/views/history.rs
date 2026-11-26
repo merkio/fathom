@@ -5,7 +5,6 @@ use eframe::egui;
 use crate::presenter::Presenter;
 
 pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
-    ui.heading("History");
     let mut chosen = None;
     egui::ScrollArea::vertical()
         .id_salt("history")

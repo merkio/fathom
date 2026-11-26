@@ -5,7 +5,8 @@ use crate::presenter::{Presenter, TabState};
 
 const ROW_HEIGHT: f32 = 20.0;
 
-pub fn show(ui: &mut egui::Ui, p: &Presenter) {
+pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
+    let mut fix = false;
     let Some(tab) = p.selected_tab() else { return };
     match &tab.state {
         TabState::Idle => {
@@ -19,6 +20,12 @@ pub fn show(ui: &mut egui::Ui, p: &Presenter) {
         }
         TabState::Failed(message) => {
             ui.colored_label(ui.visuals().error_fg_color, message);
+            fix = ui
+                .button("Fix with AI")
+                .on_hover_text(
+                    "Sends the query, the error and your schema (no data) to your AI provider",
+                )
+                .clicked();
         }
         TabState::Done(result) => {
             if result.columns.is_empty() {
@@ -70,5 +77,8 @@ pub fn show(ui: &mut egui::Ui, p: &Presenter) {
                     });
                 });
         }
+    }
+    if fix {
+        p.ai_fix_last_error();
     }
 }

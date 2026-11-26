@@ -15,6 +15,8 @@ pub struct ConnectionForm {
     pub port: String,
     pub database: String,
     pub username: String,
+    /// Per-connection read-only mode: only plain reads may run.
+    pub read_only: bool,
     /// Entered text only; moved into a `SecretString` on submit and never stored in a profile.
     pub password: String,
 }
@@ -51,6 +53,7 @@ impl ConnectionForm {
             port: p.port.map(|p| p.to_string()).unwrap_or_default(),
             database: p.database.clone().unwrap_or_default(),
             username: p.username.clone(),
+            read_only: p.read_only(),
             password: String::new(),
         }
     }
@@ -82,6 +85,7 @@ impl ConnectionForm {
         profile.port = port;
         profile.database = Some(self.database.trim().to_owned()).filter(|d| !d.is_empty());
         profile.username = self.username.trim().to_owned();
+        profile.set_read_only(self.read_only);
         Ok(profile)
     }
 
@@ -139,6 +143,18 @@ mod tests {
         );
         assert_eq!(edited.name, "b");
         assert!(f.is_editing());
+    }
+
+    #[test]
+    fn read_only_round_trips_through_the_profile() {
+        let mut f = ConnectionForm::new(None);
+        f.name = "n".into();
+        f.read_only = true;
+        let p = f.to_profile().expect("valid");
+        assert!(p.read_only());
+        assert!(ConnectionForm::from_profile(&p).read_only);
+        f.read_only = false;
+        assert!(!f.to_profile().expect("valid").read_only());
     }
 
     #[test]

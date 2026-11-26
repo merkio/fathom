@@ -6,13 +6,15 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use application::ports::SystemClock;
-use application::registry::DriverRegistry;
+use application::registry::{DriverRegistry, LlmRegistry};
 use application::usecases::{ExecuteOptions, Ports, UseCases};
 use domain::{
     Catalog, ConnectionProfile, DriverKind, QueryResult, ResultColumn, Schema, SchemaTree, Table,
     TableKind, Value,
 };
-use test_support::{FakeDriver, InMemoryConnections, InMemoryHistory, InMemorySecrets};
+use test_support::{
+    FakeDriver, InMemoryConnections, InMemoryHistory, InMemorySecrets, InMemorySettings,
+};
 use ui_egui::{Backend, Command, Event, SessionId, TabId};
 
 fn setup() -> (Backend, Receiver<Event>, FakeDriver) {
@@ -45,6 +47,8 @@ fn setup() -> (Backend, Receiver<Event>, FakeDriver) {
             secrets: Arc::new(InMemorySecrets::default()),
             clock: Arc::new(SystemClock),
             drivers: Arc::new(drivers),
+            providers: Arc::new(LlmRegistry::new()),
+            settings: Arc::new(InMemorySettings::default()),
         },
         ExecuteOptions::default(),
     );
@@ -146,6 +150,8 @@ fn notify_is_called_for_every_event() {
             secrets: Arc::new(InMemorySecrets::default()),
             clock: Arc::new(SystemClock),
             drivers: Arc::new(drivers),
+            providers: Arc::new(LlmRegistry::new()),
+            settings: Arc::new(InMemorySettings::default()),
         },
         ExecuteOptions::default(),
     );
@@ -161,4 +167,364 @@ fn notify_is_called_for_every_event() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+// ---- AI and read-only, end to end through the runtime -----------------------------------
+
+use application::ports::{LlmChunk, LlmProvider, LlmRequest, LlmResponse, ModelInfo};
+use application::usecases::AiSettings;
+use domain::{ChatMessage, Dialect};
+use futures::stream::{self, BoxStream};
+use secrecy::SecretString;
+use test_support::FakeLlm;
+use ui_egui::{AiAsk, AiId, AiTask};
+
+/// A provider whose reply never finishes: one chunk, then silence. Used to test stopping.
+struct HangingLlm;
+
+#[async_trait::async_trait]
+impl LlmProvider for HangingLlm {
+    fn id(&self) -> domain::ProviderId {
+        domain::ProviderId::new("hang")
+    }
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, application::ports::LlmError> {
+        Ok(Vec::new())
+    }
+    async fn complete(&self, _: LlmRequest) -> Result<LlmResponse, application::ports::LlmError> {
+        std::future::pending().await
+    }
+    fn stream(
+        &self,
+        _: LlmRequest,
+    ) -> BoxStream<'static, Result<LlmChunk, application::ports::LlmError>> {
+        use futures::StreamExt;
+        stream::iter([Ok(LlmChunk::Text("```sql\nSELECT 1".into()))])
+            .chain(stream::pending())
+            .boxed()
+    }
+}
+
+fn ai_env(llm: &FakeLlm) -> (Backend, Receiver<Event>, FakeDriver, Arc<InMemorySecrets>) {
+    let driver = FakeDriver::new("fake");
+    let mut drivers = DriverRegistry::new();
+    drivers.register(Arc::new(driver.clone()));
+    let mut providers = LlmRegistry::new();
+    providers.register_with_key(Arc::new(llm.clone()), domain::SecretRef::new("llm/fake"));
+    providers.register(Arc::new(HangingLlm));
+    let secrets = Arc::new(InMemorySecrets::default());
+    let use_cases = UseCases::new(
+        Ports {
+            connections: Arc::new(InMemoryConnections::default()),
+            history: Arc::new(InMemoryHistory::default()),
+            secrets: secrets.clone(),
+            clock: Arc::new(SystemClock),
+            drivers: Arc::new(drivers),
+            providers: Arc::new(providers),
+            settings: Arc::new(InMemorySettings::default()),
+        },
+        ExecuteOptions::default(),
+    );
+    let (backend, events) = Backend::spawn(Arc::new(use_cases), || {});
+    (backend, events, driver, secrets)
+}
+
+fn ask(id: u64, provider: &str, task: AiTask, rows: Option<QueryResult>) -> AiAsk {
+    AiAsk {
+        id: AiId(id),
+        provider: domain::ProviderId::new(provider),
+        model: domain::ModelId::new("m"),
+        dialect: Dialect {
+            name: "postgres",
+            ..Dialect::ANSI
+        },
+        schema: SchemaTree::default(),
+        task,
+        sample_rows: rows,
+    }
+}
+
+fn generate(question: &str) -> AiTask {
+    AiTask::Generate {
+        question: question.into(),
+        current_sql: None,
+    }
+}
+
+#[test]
+fn ai_replies_stream_then_finish_with_parsed_sql_and_a_safety_classification() {
+    let llm = FakeLlm::new(
+        "fake",
+        &["```sql\nDROP ", "TABLE users\n```", "\nRemoves it."],
+    );
+    let (backend, events, driver, _) = ai_env(&llm);
+
+    backend.send(Command::AiAsk(Box::new(ask(
+        1,
+        "fake",
+        generate("remove users"),
+        None,
+    ))));
+    let mut streamed = String::new();
+    let reply = loop {
+        match next(&events) {
+            Event::AiText { id, text } => {
+                assert_eq!(id, AiId(1));
+                streamed.push_str(&text);
+            }
+            Event::AiFinished { id, result } => {
+                assert_eq!(id, AiId(1));
+                break result.expect("reply");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert_eq!(streamed, "```sql\nDROP TABLE users\n```\nRemoves it.");
+    assert_eq!(reply.sql.as_deref(), Some("DROP TABLE users"));
+    let overall = reply.safety.and_then(|s| s.overall());
+    assert_eq!(overall.map(|k| k.label()), Some("ddl"));
+    // The assistant has no way to run it: nothing reached the database.
+    assert!(driver.executed().is_empty());
+}
+
+#[test]
+fn what_the_provider_receives_contains_schema_and_question_and_rows_only_on_opt_in() {
+    let llm = FakeLlm::new("fake", &["ok"]);
+    let (backend, events, _, _) = ai_env(&llm);
+    let rows = QueryResult {
+        columns: vec![ResultColumn {
+            name: "name".into(),
+            data_type: domain::DataType::new("text"),
+        }],
+        rows: vec![vec![Value::Text("TOP-SECRET".into())]],
+        ..QueryResult::empty()
+    };
+
+    backend.send(Command::AiAsk(Box::new(ask(
+        1,
+        "fake",
+        generate("list"),
+        None,
+    ))));
+    while !matches!(next(&events), Event::AiFinished { .. }) {}
+    assert!(!format!("{:?}", llm.requests()).contains("TOP-SECRET"));
+
+    backend.send(Command::AiAsk(Box::new(ask(
+        2,
+        "fake",
+        generate("list"),
+        Some(rows),
+    ))));
+    while !matches!(next(&events), Event::AiFinished { .. }) {}
+    assert!(
+        format!("{:?}", llm.requests()).contains("TOP-SECRET"),
+        "opt-in shares the rows"
+    );
+}
+
+#[test]
+fn preview_returns_the_prompt_without_calling_the_provider() {
+    let llm = FakeLlm::new("fake", &["ok"]);
+    let (backend, events, _, _) = ai_env(&llm);
+    backend.send(Command::AiPreview(Box::new(ask(
+        1,
+        "fake",
+        generate("list customers"),
+        None,
+    ))));
+    let Event::AiPreview(preview) = next(&events) else {
+        panic!("expected a preview")
+    };
+    assert!(preview.messages[0].content.contains("list customers"));
+    assert!(!preview.includes_sample_rows);
+    assert!(llm.requests().is_empty(), "previewing sends nothing");
+}
+
+#[test]
+fn stopping_a_hung_reply_delivers_the_partial_text_with_a_note() {
+    let llm = FakeLlm::new("fake", &[]);
+    let (backend, events, _, _) = ai_env(&llm);
+    backend.send(Command::AiAsk(Box::new(ask(
+        7,
+        "hang",
+        generate("x"),
+        None,
+    ))));
+    assert!(matches!(next(&events), Event::AiText { id: AiId(7), .. }));
+
+    backend.send(Command::AiStop(AiId(7)));
+    let Event::AiFinished { id, result } = next(&events) else {
+        panic!("expected the stop to finish")
+    };
+    assert_eq!(id, AiId(7));
+    let reply = result.expect("partial reply");
+    assert_eq!(
+        reply.sql.as_deref(),
+        Some("SELECT 1"),
+        "what arrived is kept"
+    );
+    assert!(reply.warning.is_some_and(|w| w.contains("Stopped by you")));
+}
+
+#[test]
+fn unknown_providers_and_failing_providers_end_with_an_error() {
+    let llm = FakeLlm::new("fake", &[]).failing(application::ports::LlmError::RateLimited);
+    let (backend, events, _, _) = ai_env(&llm);
+    backend.send(Command::AiAsk(Box::new(ask(
+        1,
+        "nope",
+        generate("x"),
+        None,
+    ))));
+    assert!(matches!(
+        next(&events),
+        Event::AiFinished { result: Err(_), .. }
+    ));
+    backend.send(Command::AiAsk(Box::new(ask(
+        2,
+        "fake",
+        generate("x"),
+        None,
+    ))));
+    let Event::AiFinished {
+        result: Err(message),
+        ..
+    } = next(&events)
+    else {
+        panic!("expected an error")
+    };
+    assert!(message.contains("rate limited"), "{message}");
+}
+
+#[test]
+fn chat_history_reaches_the_provider() {
+    let llm = FakeLlm::new("fake", &["ok"]);
+    let (backend, events, _, _) = ai_env(&llm);
+    let task = AiTask::Chat {
+        history: vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+        question: "and now?".into(),
+    };
+    backend.send(Command::AiAsk(Box::new(ask(1, "fake", task, None))));
+    while !matches!(next(&events), Event::AiFinished { .. }) {}
+    let sent = llm.requests().pop().expect("request");
+    assert_eq!(sent.messages.len(), 3);
+    assert_eq!(sent.messages[2].content, "and now?");
+}
+
+#[test]
+fn settings_models_and_keys_round_trip_without_exposing_the_key() {
+    let llm = FakeLlm::new("fake", &[]).with_models(&["a", "b"]);
+    let (backend, events, _, secrets) = ai_env(&llm);
+
+    backend.send(Command::LoadAiSettings);
+    assert!(matches!(next(&events), Event::AiSettings(Ok(s)) if s == AiSettings::default()));
+    let chosen = AiSettings {
+        provider: Some(domain::ProviderId::new("fake")),
+        model: Some(domain::ModelId::new("a")),
+    };
+    backend.send(Command::SaveAiSettings(chosen.clone()));
+    backend.send(Command::LoadAiSettings);
+    assert!(matches!(next(&events), Event::AiSettings(Ok(s)) if s == chosen));
+
+    backend.send(Command::ListModels(domain::ProviderId::new("fake")));
+    let Event::Models {
+        result: Ok(models), ..
+    } = next(&events)
+    else {
+        panic!("expected models")
+    };
+    assert_eq!(
+        models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+
+    backend.send(Command::LoadApiKeyStatus(domain::ProviderId::new("fake")));
+    assert!(matches!(
+        next(&events),
+        Event::ApiKeyStatus {
+            set: Some(false),
+            ..
+        }
+    ));
+    backend.send(Command::SaveApiKey {
+        provider: domain::ProviderId::new("fake"),
+        key: SecretString::from("sk-test"),
+    });
+    assert!(matches!(next(&events), Event::Notice(Ok(_))));
+    let Event::ApiKeyStatus { set, provider } = next(&events) else {
+        panic!("expected status")
+    };
+    assert_eq!((set, provider.as_str()), (Some(true), "fake"));
+    let stored = futures::executor::block_on(application::ports::SecretStore::get(
+        secrets.as_ref(),
+        &domain::SecretRef::new("llm/fake"),
+    ))
+    .expect("get")
+    .expect("stored");
+    assert_eq!(secrecy::ExposeSecret::expose_secret(&stored), "sk-test");
+
+    backend.send(Command::ClearApiKey(domain::ProviderId::new("fake")));
+    assert!(matches!(next(&events), Event::Notice(Ok(_))));
+    assert!(matches!(
+        next(&events),
+        Event::ApiKeyStatus {
+            set: Some(false),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn read_only_connections_block_writes_before_the_database_and_allow_reads() {
+    let llm = FakeLlm::new("fake", &[]);
+    let (backend, events, driver, _) = ai_env(&llm);
+    let mut profile = ConnectionProfile::new("ro", DriverKind::new("fake"), "localhost");
+    profile.set_read_only(true);
+    let id = profile.id;
+    backend.send(Command::SaveConnection {
+        profile,
+        password: None,
+    });
+    assert!(matches!(next(&events), Event::Saved(Ok(_))));
+    backend.send(Command::Connect(id));
+    let Event::Connected {
+        result: Ok(session),
+        ..
+    } = next(&events)
+    else {
+        panic!("connect")
+    };
+
+    for sql in [
+        "DELETE FROM users",
+        "DROP TABLE users",
+        "SELECT 1; UPDATE t SET a = 1",
+    ] {
+        backend.send(Command::Execute {
+            tab: TabId(1),
+            session,
+            connection: id,
+            text: sql.into(),
+        });
+        let Event::QueryFinished {
+            result: Err(message),
+            ..
+        } = next(&events)
+        else {
+            panic!("{sql} should be blocked")
+        };
+        assert!(message.contains("Read-only mode"), "{message}");
+    }
+    assert!(driver.executed().is_empty(), "nothing reached the database");
+
+    backend.send(Command::Execute {
+        tab: TabId(1),
+        session,
+        connection: id,
+        text: "SELECT 1".into(),
+    });
+    assert!(matches!(
+        next(&events),
+        Event::QueryFinished { result: Ok(_), .. }
+    ));
+    assert_eq!(driver.executed(), vec!["SELECT 1".to_string()]);
 }

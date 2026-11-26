@@ -222,6 +222,9 @@ dependencies = [
  "directories",
  "domain",
  "futures",
+ "llm-anthropic",
+ "llm-ollama",
+ "llm-openai",
  "secrecy",
  "storage",
  "ui-egui",
@@ -6132,9 +6135,11 @@ name = "ui-egui"
 version = "0.1.0"
 dependencies = [
  "application",
+ "async-trait",
  "domain",
  "eframe",
  "egui_extras",
+ "futures",
  "secrecy",
  "test-support",
  "tokio",

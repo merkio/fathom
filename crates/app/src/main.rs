@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use application::ports::{SecretStore, SystemClock};
-use application::registry::DriverRegistry;
+use application::registry::{DriverRegistry, LlmRegistry};
 use application::usecases::{ExecuteOptions, Ports, UseCases};
 use domain::SecretRef;
 use secrecy::SecretString;
@@ -46,19 +46,62 @@ fn secret_store() -> Arc<dyn SecretStore> {
     }
 }
 
+/// LLM providers: one registration line each. Keys live in the secret store under the given
+/// references; the settings screen saves them there. Ollama needs none and defaults to the local
+/// machine, so nothing leaves it unless the user picks a cloud provider.
+///
+/// `DBIEVER_OLLAMA_URL` and `DBIEVER_OPENAI_BASE_URL` point the adapters at other servers (for
+/// example a remote Ollama or an OpenAI-compatible endpoint).
+fn llm_providers(secrets: Arc<dyn SecretStore>) -> anyhow::Result<LlmRegistry> {
+    let mut registry = LlmRegistry::new();
+
+    let ollama = match std::env::var("DBIEVER_OLLAMA_URL") {
+        Ok(url) => llm_ollama::OllamaConfig::with_base_url(url),
+        Err(_) => llm_ollama::OllamaConfig::default(),
+    };
+    registry.register(Arc::new(llm_ollama::OllamaProvider::new(ollama)?));
+
+    let anthropic_key = SecretRef::new("llm/anthropic");
+    let anthropic = llm_anthropic::AnthropicConfig::new(anthropic_key.clone());
+    registry.register_with_key(
+        Arc::new(llm_anthropic::AnthropicProvider::new(
+            anthropic,
+            secrets.clone(),
+        )?),
+        anthropic_key,
+    );
+
+    let openai_key = SecretRef::new("llm/openai");
+    let mut openai = llm_openai::OpenAiConfig::new(openai_key.clone());
+    if let Ok(url) = std::env::var("DBIEVER_OPENAI_BASE_URL") {
+        openai = openai.with_base_url(url);
+    }
+    registry.register_with_key(
+        Arc::new(llm_openai::OpenAiProvider::new(openai, secrets)?),
+        openai_key,
+    );
+
+    Ok(registry)
+}
+
 fn main() -> anyhow::Result<()> {
     let store = Arc::new(SqliteStore::open(data_dir()?.join("dbiever.sqlite"))?);
 
     let mut drivers = DriverRegistry::new();
     drivers.register(Arc::new(db_postgres::PostgresDriver::new()));
 
+    let secrets = secret_store();
+    let llm = llm_providers(secrets.clone())?;
+
     let use_cases = UseCases::new(
         Ports {
             connections: store.clone(),
-            history: store,
-            secrets: secret_store(),
+            history: store.clone(),
+            settings: store,
+            secrets,
             clock: Arc::new(SystemClock),
             drivers: Arc::new(drivers),
+            providers: Arc::new(llm),
         },
         ExecuteOptions::default(),
     );
