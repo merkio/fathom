@@ -57,6 +57,11 @@ impl UseCases {
         }
     }
 
+    /// Each connectable database kind with its dialect (keywords, quoting) for the editor.
+    pub fn dialects(&self) -> Vec<(DriverKind, domain::Dialect)> {
+        self.drivers.dialects()
+    }
+
     /// Database kinds that can currently be connected to.
     pub fn driver_kinds(&self) -> Vec<DriverKind> {
         self.drivers.kinds()

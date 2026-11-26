@@ -29,6 +29,14 @@ impl DriverRegistry {
     pub fn kinds(&self) -> Vec<DriverKind> {
         self.drivers.keys().cloned().collect()
     }
+
+    /// Each registered kind with its dialect.
+    pub fn dialects(&self) -> Vec<(DriverKind, domain::Dialect)> {
+        self.drivers
+            .iter()
+            .map(|(k, d)| (k.clone(), d.dialect()))
+            .collect()
+    }
 }
 
 #[derive(Default)]

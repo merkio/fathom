@@ -3,6 +3,7 @@ use domain::{Dialect, LimitStyle};
 pub(crate) const POSTGRES_DIALECT: Dialect = Dialect {
     name: "postgres",
     identifier_quote: '"',
+    quote_mixed_case: true,
     limit_style: LimitStyle::Limit,
     keywords: &[
         "SELECT",

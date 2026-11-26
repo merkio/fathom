@@ -19,7 +19,7 @@ pub struct DbieverApp {
 
 impl DbieverApp {
     pub fn new(ctx: &egui::Context, use_cases: Arc<UseCases>) -> Self {
-        let presenter = Presenter::new(use_cases.driver_kinds());
+        let presenter = Presenter::new(use_cases.dialects());
         let repaint = ctx.clone();
         let (backend, events) = Backend::spawn(use_cases, move || repaint.request_repaint());
         Self {

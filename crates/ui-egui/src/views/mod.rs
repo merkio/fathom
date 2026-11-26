@@ -1,6 +1,7 @@
 //! Views: pure egui drawing. They read presenter state and call presenter methods; they contain
 //! no business logic.
 
+mod code_editor;
 mod connections;
 mod editor;
 mod history;

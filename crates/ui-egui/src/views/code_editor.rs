@@ -1,0 +1,241 @@
+//! SQL editor widget: `egui::TextEdit` with syntax highlighting and a completion popup.
+//!
+//! All decisions (what to suggest, when the popup shows, what accepting does) live in the
+//! presenter and `application`; this file only draws and translates keys.
+
+use application::sql::{Suggestion, SuggestionKind, SyntaxClass, highlight};
+use domain::Dialect;
+use eframe::egui::{
+    self, Color32, FontId, Id, Key, Modifiers, Order, TextFormat,
+    text::{CCursor, CCursorRange, LayoutJob},
+    text_edit::TextEditState,
+};
+
+use crate::bridge::TabId;
+use crate::presenter::Presenter;
+
+const POPUP_MAX_HEIGHT: f32 = 220.0;
+
+fn color(class: SyntaxClass, dark: bool) -> Option<Color32> {
+    // `None` keeps the default text colour.
+    let (d, l) = match class {
+        SyntaxClass::Keyword => (
+            Color32::from_rgb(86, 156, 214),
+            Color32::from_rgb(0, 0, 200),
+        ),
+        SyntaxClass::Function => (
+            Color32::from_rgb(220, 220, 170),
+            Color32::from_rgb(120, 80, 0),
+        ),
+        SyntaxClass::String => (
+            Color32::from_rgb(206, 145, 120),
+            Color32::from_rgb(163, 21, 21),
+        ),
+        SyntaxClass::Number => (
+            Color32::from_rgb(181, 206, 168),
+            Color32::from_rgb(9, 134, 88),
+        ),
+        SyntaxClass::Comment => (
+            Color32::from_rgb(106, 153, 85),
+            Color32::from_rgb(0, 128, 0),
+        ),
+        SyntaxClass::Identifier | SyntaxClass::Punctuation | SyntaxClass::Whitespace => {
+            return None;
+        }
+    };
+    Some(if dark { d } else { l })
+}
+
+fn highlight_job(ui: &egui::Ui, text: &str, dialect: &Dialect, wrap_width: f32) -> LayoutJob {
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let default = ui.visuals().text_color();
+    let dark = ui.visuals().dark_mode;
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = wrap_width;
+    for span in highlight(text, dialect) {
+        let color = color(span.class, dark).unwrap_or(default);
+        job.append(
+            &text[span.range],
+            0.0,
+            TextFormat::simple(FontId { ..font.clone() }, color),
+        );
+    }
+    job
+}
+
+fn byte_to_char(text: &str, byte: usize) -> usize {
+    text.get(..byte)
+        .map_or_else(|| text.chars().count(), |s| s.chars().count())
+}
+
+fn char_to_byte(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map_or(text.len(), |(b, _)| b)
+}
+
+fn set_cursor(ctx: &egui::Context, id: Id, text: &str, byte: usize) {
+    let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+    let at = CCursor::new(byte_to_char(text, byte));
+    state.cursor.set_char_range(Some(CCursorRange::one(at)));
+    state.store(ctx, id);
+}
+
+fn kind_tag(kind: SuggestionKind) -> &'static str {
+    match kind {
+        SuggestionKind::Keyword => "kw",
+        SuggestionKind::Function => "fn",
+        SuggestionKind::Schema => "sch",
+        SuggestionKind::Table => "tbl",
+        SuggestionKind::View => "view",
+        SuggestionKind::Column => "col",
+        SuggestionKind::Join => "join",
+    }
+}
+
+/// Cursor of the editor as of the last frame, as a byte offset.
+fn cursor_byte(ctx: &egui::Context, id: Id, text: &str) -> Option<usize> {
+    let state = TextEditState::load(ctx, id)?;
+    let range = state.cursor.char_range()?;
+    Some(char_to_byte(text, range.primary.index.0))
+}
+
+/// `height` is the space the editor should fill, so the whole area is clickable.
+pub fn show(ui: &mut egui::Ui, p: &mut Presenter, tab: TabId, height: f32) {
+    let ctx = ui.ctx().clone();
+    let edit_id = ui.make_persistent_id(("editor_text", tab.0));
+    let dialect = p.tab_dialect(tab);
+    let focused = ctx.memory(|m| m.has_focus(edit_id));
+
+    // 1. Keys that drive the popup are consumed before the text edit sees them.
+    if focused {
+        let text = p
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
+        if let Some(cursor) = cursor_byte(&ctx, edit_id, &text) {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Space)) {
+                p.request_popup(tab, cursor);
+            }
+            let shown = p.popup(tab, cursor);
+            if !shown.is_empty() {
+                let n = shown.len();
+                if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown)) {
+                    p.move_selection(tab, 1, n);
+                }
+                if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
+                    p.move_selection(tab, -1, n);
+                }
+                if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                    p.dismiss_popup(tab, cursor);
+                }
+                let accept = ctx.input_mut(|i| {
+                    i.consume_key(Modifiers::NONE, Key::Enter)
+                        || i.consume_key(Modifiers::NONE, Key::Tab)
+                });
+                if accept {
+                    let chosen = p
+                        .selected_tab()
+                        .map_or(0, |t| t.completion.selected)
+                        .min(n - 1);
+                    if let Some(new_cursor) = p.accept_suggestion(tab, &shown[chosen]) {
+                        let text = p.tabs.iter().find(|t| t.id == tab).map(|t| t.text.clone());
+                        set_cursor(&ctx, edit_id, &text.unwrap_or_default(), new_cursor);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. The editor itself.
+    let line = ui.text_style_height(&egui::TextStyle::Monospace).max(1.0);
+    let rows = ((height / line).floor() as usize).max(8);
+    let Some(tab_state) = p.tab_mut(tab) else {
+        return;
+    };
+    let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+        let job = highlight_job(ui, text.as_str(), &dialect, wrap_width);
+        ui.painter().layout_job(job)
+    };
+    let output = egui::TextEdit::multiline(&mut tab_state.text)
+        .id(edit_id)
+        .code_editor()
+        .hint_text("SELECT ...")
+        .desired_width(f32::INFINITY)
+        .desired_rows(rows)
+        .layouter(&mut layouter)
+        .show(ui);
+
+    // 3. The popup, from the state after this frame's edits.
+    let Some(range) = output.cursor_range else {
+        return;
+    };
+    if !output.response.has_focus() {
+        return;
+    }
+    let text = p
+        .tabs
+        .iter()
+        .find(|t| t.id == tab)
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    let cursor = char_to_byte(&text, range.primary.index.0);
+    let shown = p.popup(tab, cursor);
+    if shown.is_empty() {
+        return;
+    }
+    let selected = p.selected_tab().map_or(0, |t| t.completion.selected);
+    let anchor =
+        output.galley.pos_from_cursor(range.primary).left_bottom() + output.galley_pos.to_vec2();
+
+    let mut clicked: Option<usize> = None;
+    egui::Area::new(ui.make_persistent_id(("completion_popup", tab.0)))
+        .order(Order::Foreground)
+        .fixed_pos(anchor + egui::vec2(0.0, 2.0))
+        .show(&ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(460.0);
+                egui::ScrollArea::vertical()
+                    .max_height(POPUP_MAX_HEIGHT)
+                    .min_scrolled_height(POPUP_MAX_HEIGHT)
+                    .show(ui, |ui| {
+                        for (i, s) in shown.iter().enumerate() {
+                            let row = row(ui, s, i == selected);
+                            if i == selected
+                                && ctx.input(|i| {
+                                    i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::ArrowUp)
+                                })
+                            {
+                                row.scroll_to_me(None);
+                            }
+                            if row.clicked() {
+                                clicked = Some(i);
+                            }
+                        }
+                    });
+            });
+        });
+    if let Some(i) = clicked
+        && let Some(new_cursor) = p.accept_suggestion(tab, &shown[i])
+    {
+        let text = p
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
+        set_cursor(&ctx, edit_id, &text, new_cursor);
+        ctx.memory_mut(|m| m.request_focus(edit_id));
+    }
+}
+
+fn row(ui: &mut egui::Ui, s: &Suggestion, selected: bool) -> egui::Response {
+    let text = egui::RichText::new(format!("{:<5}{}", kind_tag(s.kind), s.text)).monospace();
+    let mut response = ui.selectable_label(selected, text);
+    if let Some(detail) = &s.detail {
+        response = response.on_hover_text(detail);
+    }
+    response
+}
