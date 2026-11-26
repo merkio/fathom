@@ -190,7 +190,7 @@ Each milestone: **Goal / Tasks / Done when**. Keep PRs small.
 1. Non-SQL databases (Mongo, Cassandra): the ports allow different `QueryLanguage` values, but the result grid and the SQL-safety guard assume SQL. Decide how to handle this before building the first such adapter.
 2. Whether to support LLM tool-use/agentic query execution. It was not selected, so it is out of scope.
 3. Telemetry: none planned.
-4. Licence for the project.
+4. Licence for the project: decided, Apache-2.0 (see `LICENSE`).
 
 ## 7. Using this plan in Claude Code
 - Put `CLAUDE.md` and `PLAN.md` in the repo root. Claude Code loads `CLAUDE.md` automatically.

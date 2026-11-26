@@ -120,4 +120,4 @@ was added exactly this way). **Adding an LLM provider** is the same with `LlmPro
 
 ## License
 
-Not yet chosen.
+Licensed under the [Apache License, Version 2.0](LICENSE).
