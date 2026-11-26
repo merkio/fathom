@@ -897,14 +897,15 @@ impl Presenter {
                 self.testing = false;
                 self.status = Some(match result {
                     Ok(()) => Status::Info("Connection successful".into()),
-                    Err(e) => Status::Error(format!("Connection failed: {e}")),
+                    // The message already says what failed (see `describe`).
+                    Err(e) => Status::Error(e),
                 });
             }
             Event::Connected { connection, result } => {
                 self.connecting.remove(&connection);
                 match result {
                     Ok(session) => self.on_connected(connection, session),
-                    Err(e) => self.error(format!("Could not connect: {e}")),
+                    Err(e) => self.error(e),
                 }
             }
             Event::Disconnected(session) => self.on_disconnected(session),

@@ -10,4 +10,4 @@
 - [x] M6. (adapters verified against mock servers only; no real provider was called) LLM core and adapters
 - [x] M7. (UI smoke-tested against a protocol-faithful fake Ollama server; no real Ollama or cloud provider was available) AI features in the UI
 - [x] M7b. (smoke-tested against a protocol-faithful fake Ollama server) LLM inline suggestions
-- [ ] M8. Hardening (8a export, error hints, redacting logs: done; 8b TLS options and extensibility proof, 8c packaging: pending)
+- [ ] M8. Hardening (8a export, error hints, redacting logs: done; 8b TLS options and the SQLite extensibility proof: done; SSH tunnel not done, awaiting a decision; 8c packaging: pending)

@@ -5,6 +5,50 @@ use std::fmt;
 use domain::{ConnectionProfile, DriverKind};
 use secrecy::SecretString;
 
+/// Options edited through their own controls rather than the free-form box.
+const RESERVED_OPTIONS: &[&str] = &["read_only", "inline_ai"];
+
+fn format_options(p: &ConnectionProfile) -> String {
+    p.options
+        .iter()
+        .filter(|(k, _)| !RESERVED_OPTIONS.contains(&k.as_str()))
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Parses `key=value` lines. Blank lines and `#` comments are skipped; the value may contain `=`.
+fn parse_options(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!(
+                "Advanced options, line {}: expected key=value, found `{line}`",
+                i + 1
+            ));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(format!(
+                "Advanced options, line {}: the key is empty",
+                i + 1
+            ));
+        }
+        if RESERVED_OPTIONS.contains(&key) {
+            return Err(format!(
+                "Advanced options, line {}: `{key}` has its own control in this dialog",
+                i + 1
+            ));
+        }
+        out.push((key.to_owned(), value.trim().to_owned()));
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Default)]
 pub struct ConnectionForm {
     /// The profile being edited, if any. Keeps its id, secret reference and options.
@@ -19,6 +63,9 @@ pub struct ConnectionForm {
     pub read_only: bool,
     /// Per-connection override of LLM inline suggestions: `None` follows the global setting.
     pub inline_ai: Option<bool>,
+    /// Driver-specific options, one `key=value` per line (for example `sslmode=verify-full`).
+    /// `read_only` and `inline_ai` have their own controls and are not listed here.
+    pub extra_options: String,
     /// Entered text only; moved into a `SecretString` on submit and never stored in a profile.
     pub password: String,
 }
@@ -57,6 +104,7 @@ impl ConnectionForm {
             username: p.username.clone(),
             read_only: p.read_only(),
             inline_ai: p.inline_ai(),
+            extra_options: format_options(p),
             password: String::new(),
         }
     }
@@ -88,6 +136,12 @@ impl ConnectionForm {
         profile.port = port;
         profile.database = Some(self.database.trim().to_owned()).filter(|d| !d.is_empty());
         profile.username = self.username.trim().to_owned();
+        // Replace the free-form options (so a deleted line is really removed); the options with
+        // their own controls are set below.
+        profile
+            .options
+            .retain(|k, _| RESERVED_OPTIONS.contains(&k.as_str()));
+        profile.options.extend(parse_options(&self.extra_options)?);
         profile.set_read_only(self.read_only);
         profile.set_inline_ai(self.inline_ai);
         Ok(profile)
@@ -173,6 +227,78 @@ mod tests {
             assert_eq!(p.inline_ai(), choice);
             assert_eq!(ConnectionForm::from_profile(&p).inline_ai, choice);
         }
+    }
+
+    #[test]
+    fn advanced_options_are_parsed_trimmed_and_may_contain_equals_signs() {
+        let mut f = ConnectionForm::new(None);
+        f.name = "n".into();
+        f.extra_options =
+            "# TLS\n sslmode = verify-full \n\nsslrootcert=/etc/ssl/ca.pem\noptions=a=b=c\n".into();
+        let p = f.to_profile().expect("valid");
+        assert_eq!(
+            p.options.get("sslmode").map(String::as_str),
+            Some("verify-full")
+        );
+        assert_eq!(
+            p.options.get("sslrootcert").map(String::as_str),
+            Some("/etc/ssl/ca.pem")
+        );
+        assert_eq!(p.options.get("options").map(String::as_str), Some("a=b=c"));
+        assert_eq!(p.options.len(), 3);
+    }
+
+    #[test]
+    fn malformed_and_reserved_option_lines_are_rejected_with_the_line_number() {
+        let mut f = ConnectionForm::new(None);
+        f.name = "n".into();
+        f.extra_options = "sslmode=require\njust text".into();
+        assert!(f.to_profile().expect_err("no =").contains("line 2"));
+        f.extra_options = "=value".into();
+        assert!(
+            f.to_profile()
+                .expect_err("empty key")
+                .contains("key is empty")
+        );
+        f.extra_options = "read_only=true".into();
+        assert!(
+            f.to_profile()
+                .expect_err("reserved")
+                .contains("own control")
+        );
+        f.extra_options = "inline_ai=on".into();
+        assert!(f.to_profile().is_err());
+    }
+
+    #[test]
+    fn editing_options_round_trips_and_deleting_a_line_removes_the_option() {
+        let mut original = ConnectionProfile::new("a", DriverKind::new("postgres"), "h");
+        original.options.insert("sslmode".into(), "require".into());
+        original.options.insert("timeout".into(), "5".into());
+        original.set_read_only(true);
+
+        let mut f = ConnectionForm::from_profile(&original);
+        assert_eq!(
+            f.extra_options, "sslmode=require\ntimeout=5",
+            "reserved options are not listed"
+        );
+        assert!(f.read_only);
+
+        f.extra_options = "sslmode=require".into(); // the timeout line was deleted
+        let edited = f.to_profile().expect("valid");
+        assert!(
+            !edited.options.contains_key("timeout"),
+            "{:?}",
+            edited.options
+        );
+        assert!(
+            edited.read_only(),
+            "the checkbox-controlled option survives"
+        );
+        assert_eq!(
+            edited.options.get("sslmode").map(String::as_str),
+            Some("require")
+        );
     }
 
     #[test]

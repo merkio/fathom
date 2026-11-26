@@ -219,6 +219,7 @@ dependencies = [
  "anyhow",
  "application",
  "db-postgres",
+ "db-sqlite",
  "directories",
  "domain",
  "futures",
@@ -1229,6 +1230,20 @@ dependencies = [
  "sqlx",
  "test-support",
  "testcontainers-modules",
+ "tokio",
+]
+
+[[package]]
+name = "db-sqlite"
+version = "0.1.0"
+dependencies = [
+ "application",
+ "async-trait",
+ "domain",
+ "rusqlite",
+ "secrecy",
+ "tempfile",
+ "test-support",
  "tokio",
 ]
 

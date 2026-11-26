@@ -143,6 +143,20 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// Commands that write settings or keys. The backend runs them one after another in the
+    /// order they were sent; every other command runs concurrently as its own task.
+    pub fn is_ordered(&self) -> bool {
+        matches!(
+            self,
+            Command::SaveAiSettings(_)
+                | Command::SaveInlineSettings(_)
+                | Command::SaveApiKey { .. }
+                | Command::ClearApiKey(_)
+        )
+    }
+}
+
 /// A finished export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportDone {

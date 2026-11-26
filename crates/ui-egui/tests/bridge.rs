@@ -1213,3 +1213,44 @@ mod logging {
         }
     }
 }
+
+#[test]
+fn settings_writes_apply_in_the_order_they_were_sent() {
+    let llm = FakeLlm::new("fake", &[]);
+    let (backend, events, _, _) = ai_env(&llm);
+    let settings = |model: &str| AiSettings {
+        provider: Some(domain::ProviderId::new("fake")),
+        model: Some(domain::ModelId::new(model)),
+    };
+    // Many rapid writes followed by a read: the read must always see the last write. Before
+    // writes were ordered this was a race between independent tasks.
+    for round in 0..200 {
+        let last = format!("model-{round}");
+        for m in ["first", "second", &last] {
+            backend.send(Command::SaveAiSettings(settings(m)));
+        }
+        backend.send(Command::LoadAiSettings);
+        let Event::AiSettings(Ok(seen)) = next(&events) else {
+            panic!("settings")
+        };
+        assert_eq!(seen, settings(&last), "round {round}");
+    }
+}
+
+#[test]
+fn only_settings_and_key_writes_are_ordered() {
+    let ordered = [
+        Command::SaveAiSettings(AiSettings::default()),
+        Command::SaveInlineSettings(InlineSettings::default()),
+        Command::ClearApiKey(domain::ProviderId::new("p")),
+    ];
+    assert!(ordered.iter().all(Command::is_ordered));
+    for command in [
+        Command::LoadConnections,
+        Command::LoadAiSettings,
+        Command::Cancel(SessionId(1)),
+        Command::AiStop(AiId(1)),
+    ] {
+        assert!(!command.is_ordered(), "{command:?} must stay concurrent");
+    }
+}

@@ -156,7 +156,16 @@ pub fn show_form(ctx: &egui::Context, p: &mut Presenter) {
                             });
                         ui.end_row();
 
-                        ui.label("Password");
+                        ui.label("Advanced");
+                ui.add(
+                    egui::TextEdit::multiline(&mut form.extra_options)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("key=value per line, e.g. sslmode=verify-full\nsslrootcert=/path/to/ca.pem"),
+                );
+                ui.end_row();
+
+                ui.label("Password");
                         let hint = if form.is_editing() { "unchanged" } else { "" };
                         ui.add(
                             egui::TextEdit::singleline(&mut form.password)

@@ -16,6 +16,7 @@ domain = { path = "../domain" }
 application = { path = "../application" }
 storage = { path = "../storage" }
 db-postgres = { path = "../db-postgres" }
+db-sqlite = { path = "../db-sqlite" }
 llm-anthropic = { path = "../llm-anthropic" }
 llm-ollama = { path = "../llm-ollama" }
 llm-openai = { path = "../llm-openai" }
