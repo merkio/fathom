@@ -1,7 +1,7 @@
 # Progress
 
 - [x] M0. Workspace skeleton and guardrails
-- [ ] M1. Domain and ports
+- [x] M1. Domain and ports
 - [ ] M2. Connection management
 - [ ] M3. PostgreSQL adapter
 - [ ] M4. MySQL/MariaDB adapter
