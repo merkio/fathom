@@ -1,0 +1,25 @@
+---
+source: crates/application/tests/prompts.rs
+expression: render(&p)
+---
+template: generate_sql/v1
+
+--- system ---
+You are a database assistant inside a SQL client.
+Database: postgres. Quote identifiers with ". Row limits use LIMIT n.
+
+Schema (names and types only, no data):
+public.customers(id integer PK NOT NULL, name text NOT NULL, email text)
+public.orders(id integer PK NOT NULL, customer_id integer NOT NULL, total numeric(10,2)) FK(customer_id)->customers(id)
+
+Task: translate the user's request into a query for this database. Prefer read-only queries unless the user clearly asks to change data.
+Reply with exactly one SQL statement in a single ```sql fenced block, followed by a short plain-language explanation. Use only tables and columns that appear in the schema. If the request cannot be answered with this schema, say so instead of guessing.
+
+--- messages ---
+[User]
+Write a query for: only the top 5
+
+The editor currently contains:
+```sql
+SELECT customer_id, sum(total) FROM orders GROUP BY 1
+```

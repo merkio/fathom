@@ -1,7 +1,7 @@
-use domain::{ConnectionId, DomainError, DriverKind};
+use domain::{ConnectionId, DomainError, DriverKind, ProviderId};
 use thiserror::Error;
 
-use crate::ports::{DbError, SecretError, StorageError};
+use crate::ports::{DbError, LlmError, SecretError, StorageError};
 
 /// Error returned by use cases; wraps the lower-level errors they combine.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -14,6 +14,12 @@ pub enum UseCaseError {
     Secret(#[from] SecretError),
     #[error(transparent)]
     Db(#[from] DbError),
+    #[error(transparent)]
+    Llm(#[from] LlmError),
+    #[error("no LLM provider registered for `{}`", .0.as_str())]
+    UnknownProvider(ProviderId),
+    #[error("{0}")]
+    Blocked(String),
     #[error("no driver registered for `{}`", .0.as_str())]
     UnknownDriver(DriverKind),
     #[error("connection {} not found", .0.0)]
