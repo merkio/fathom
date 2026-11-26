@@ -13,6 +13,8 @@ use domain::{
 };
 
 use crate::ai::{AiMode, AiRun, AiRunState, AiState, Followup};
+use application::export::ExportFormat;
+
 use crate::bridge::{AiAsk, AiTask, Command, Event, SessionId, TabId};
 use crate::form::ConnectionForm;
 use crate::inline::{Ghost, InlineState, Snapshot};
@@ -74,6 +76,15 @@ pub struct QueryTab {
     pub completion: CompletionState,
 }
 
+/// Export controls under the result grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportUi {
+    pub format: ExportFormat,
+    /// File name typed by the user (empty: a default name).
+    pub name: String,
+    pub running: bool,
+}
+
 /// Which panel is shown on the right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightPanel {
@@ -99,6 +110,7 @@ pub struct Presenter {
     pub right_panel: RightPanel,
     pub ai: AiState,
     pub inline: InlineState,
+    pub export: ExportUi,
     dialects: Vec<(DriverKind, Dialect)>,
     next_tab: u64,
     outbox: Vec<Command>,
@@ -134,6 +146,11 @@ impl Presenter {
             right_panel: RightPanel::History,
             ai: AiState::new(llm_providers),
             inline: InlineState::new(),
+            export: ExportUi {
+                format: ExportFormat::Csv,
+                name: String::new(),
+                running: false,
+            },
             dialects,
             next_tab: 1,
             outbox,
@@ -559,6 +576,38 @@ impl Presenter {
         &self.ai.settings
     }
 
+    // --- export ---------------------------------------------------------------------------
+
+    /// Exports the statement the selected tab last ran (not the possibly edited editor text), up
+    /// to the export row cap, to a new file.
+    pub fn export_selected(&mut self) {
+        if self.export.running {
+            return;
+        }
+        let Some(id) = self.selected else { return };
+        let Some(connection) = self.tab_connection(id) else {
+            return;
+        };
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
+            return;
+        };
+        if !matches!(tab.state, TabState::Done(_)) || tab.executed.trim().is_empty() {
+            self.status = Some(Status::Error(
+                "Run a query first; the export re-runs it.".into(),
+            ));
+            return;
+        }
+        self.export.running = true;
+        self.outbox.push(Command::Export {
+            tab: id,
+            session: tab.session,
+            connection,
+            text: tab.executed.clone(),
+            format: self.export.format,
+            name: self.export.name.clone(),
+        });
+    }
+
     // --- LLM inline suggestions ---------------------------------------------------------------
 
     /// Whether inline suggestions are on for this connection: its own override if it has one,
@@ -779,6 +828,24 @@ impl Presenter {
 
     pub fn handle(&mut self, event: Event) {
         match event {
+            Event::Exported { result, .. } => {
+                self.export.running = false;
+                self.status = Some(match result {
+                    Ok(done) => {
+                        let more = if done.truncated {
+                            " (stopped at the row limit; more rows exist)"
+                        } else {
+                            ""
+                        };
+                        Status::Info(format!(
+                            "Exported {} row(s) to {}{more}",
+                            done.rows,
+                            done.path.display()
+                        ))
+                    }
+                    Err(message) => Status::Error(format!("Export failed: {message}")),
+                });
+            }
             Event::InlineText { id, completion } => {
                 self.inline
                     .on_text(id, completion.suggestion.text, completion.safety);
@@ -2217,5 +2284,104 @@ mod tests {
         );
         p.handle(Event::InlineSettings(Err("disk".into())));
         assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("disk")));
+    }
+
+    // ---- export -----------------------------------------------------------------------
+
+    use crate::bridge::ExportDone;
+
+    fn ran(p: &mut Presenter, tab: TabId, sql: &str) {
+        p.tab_mut(tab).expect("tab").text = sql.into();
+        p.run(tab);
+        p.take_commands();
+        p.handle(Event::QueryFinished {
+            tab,
+            result: Ok(rows(3)),
+        });
+        p.take_commands();
+    }
+
+    #[test]
+    fn export_sends_the_statement_that_ran_not_the_edited_text() {
+        let (mut p, tab) = ai_ready();
+        ran(&mut p, tab, "select * from customers");
+        p.tab_mut(tab).expect("tab").text = "something else".into();
+        p.export.format = ExportFormat::Json;
+        p.export.name = "customers".into();
+
+        p.export_selected();
+        let cmds = p.take_commands();
+        assert!(
+            matches!(&cmds[..], [Command::Export { text, format, name, .. }]
+            if text == "select * from customers" && *format == ExportFormat::Json && name == "customers"),
+            "{cmds:?}"
+        );
+        assert!(p.export.running);
+    }
+
+    #[test]
+    fn export_needs_a_finished_query_and_ignores_double_clicks() {
+        let (mut p, tab) = ai_ready();
+        p.export_selected();
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("Run a query first")));
+        assert!(p.take_commands().is_empty());
+
+        ran(&mut p, tab, "select 1");
+        p.export_selected();
+        p.export_selected();
+        assert_eq!(p.take_commands().len(), 1, "one export at a time");
+    }
+
+    #[test]
+    fn a_failed_query_cannot_be_exported() {
+        let (mut p, tab) = ai_ready();
+        p.tab_mut(tab).expect("tab").text = "bad".into();
+        p.run(tab);
+        p.take_commands();
+        p.handle(Event::QueryFinished {
+            tab,
+            result: Err("syntax".into()),
+        });
+        p.take_commands(); // the history reload
+        p.export_selected();
+        assert!(p.take_commands().is_empty());
+    }
+
+    #[test]
+    fn export_results_are_reported_in_the_status_bar() {
+        let (mut p, tab) = ai_ready();
+        ran(&mut p, tab, "select 1");
+        p.export_selected();
+        p.take_commands();
+        p.handle(Event::Exported {
+            tab,
+            result: Ok(ExportDone {
+                path: "/tmp/out.csv".into(),
+                rows: 42,
+                truncated: false,
+            }),
+        });
+        assert!(!p.export.running);
+        assert!(
+            matches!(&p.status, Some(Status::Info(m)) if m.contains("42 row(s)") && m.contains("/tmp/out.csv") && !m.contains("limit"))
+        );
+
+        p.handle(Event::Exported {
+            tab,
+            result: Ok(ExportDone {
+                path: "/tmp/big.csv".into(),
+                rows: 100_000,
+                truncated: true,
+            }),
+        });
+        assert!(matches!(&p.status, Some(Status::Info(m)) if m.contains("more rows exist")));
+
+        p.export.running = true;
+        p.handle(Event::Exported {
+            tab,
+            result: Err("`x.csv` already exists".into()),
+        });
+        assert!(!p.export.running, "a failure frees the button");
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("already exists")));
     }
 }

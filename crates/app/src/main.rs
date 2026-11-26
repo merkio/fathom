@@ -1,12 +1,14 @@
 //! Composition root: the only place that knows concrete adapter types.
 
+mod logging;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use application::ports::{SecretStore, SystemClock};
 use application::registry::{DriverRegistry, LlmRegistry};
-use application::usecases::{ExecuteOptions, Ports, UseCases};
+use application::usecases::{ExecuteOptions, ExportOptions, Ports, UseCases};
 use domain::SecretRef;
 use secrecy::SecretString;
 use storage::{KeyringSecretStore, MemorySecretStore, SqliteStore};
@@ -84,8 +86,22 @@ fn llm_providers(secrets: Arc<dyn SecretStore>) -> anyhow::Result<LlmRegistry> {
     Ok(registry)
 }
 
+/// Exports go to the user's Documents folder (or home), else the data directory.
+fn export_dir(data_dir: &std::path::Path) -> PathBuf {
+    directories::UserDirs::new()
+        .and_then(|d| {
+            d.document_dir()
+                .map(PathBuf::from)
+                .or_else(|| Some(d.home_dir().to_path_buf()))
+        })
+        .unwrap_or_else(|| data_dir.join("exports"))
+}
+
 fn main() -> anyhow::Result<()> {
-    let store = Arc::new(SqliteStore::open(data_dir()?.join("dbiever.sqlite"))?);
+    let data = data_dir()?;
+    logging::init(&data);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
+    let store = Arc::new(SqliteStore::open(data.join("dbiever.sqlite"))?);
 
     let mut drivers = DriverRegistry::new();
     drivers.register(Arc::new(db_postgres::PostgresDriver::new()));
@@ -104,7 +120,11 @@ fn main() -> anyhow::Result<()> {
             providers: Arc::new(llm),
         },
         ExecuteOptions::default(),
-    );
+    )
+    .with_export(ExportOptions {
+        directory: export_dir(&data),
+        ..ExportOptions::default()
+    });
 
     ui_egui::run(Arc::new(use_cases)).map_err(|e| anyhow!("{e}"))
 }

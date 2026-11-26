@@ -2,6 +2,9 @@
 //!
 //! Errors cross the bridge as display strings: the UI only shows them.
 
+use std::path::PathBuf;
+
+use application::export::ExportFormat;
 use application::ports::{HistoryEntry, ModelInfo};
 use application::usecases::{
     AiSettings, AssistReply, AssistTask, InlineCompletion, InlineSettings, PromptPreview,
@@ -129,6 +132,24 @@ pub enum Command {
     InlineCancel(AiId),
     LoadInlineSettings,
     SaveInlineSettings(InlineSettings),
+    /// Re-runs `text` (up to the export row cap) and writes the result to a new file.
+    Export {
+        tab: TabId,
+        session: SessionId,
+        connection: ConnectionId,
+        text: String,
+        format: ExportFormat,
+        name: String,
+    },
+}
+
+/// A finished export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportDone {
+    pub path: PathBuf,
+    pub rows: usize,
+    /// More rows existed than the cap allowed.
+    pub truncated: bool,
 }
 
 /// Backend to UI.
@@ -189,4 +210,8 @@ pub enum Event {
         error: Option<String>,
     },
     InlineSettings(Result<InlineSettings, String>),
+    Exported {
+        tab: TabId,
+        result: Result<ExportDone, String>,
+    },
 }

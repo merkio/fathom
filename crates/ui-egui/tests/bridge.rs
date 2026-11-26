@@ -392,7 +392,7 @@ fn unknown_providers_and_failing_providers_end_with_an_error() {
     else {
         panic!("expected an error")
     };
-    assert!(message.contains("rate limited"), "{message}");
+    assert!(message.contains("rate limiting"), "{message}");
 }
 
 #[test]
@@ -875,7 +875,7 @@ fn provider_failures_are_reported_in_the_done_event() {
     else {
         panic!("expected an error")
     };
-    assert!(message.contains("rate limited"), "{message}");
+    assert!(message.contains("rate limiting"), "{message}");
 }
 
 #[test]
@@ -891,4 +891,325 @@ fn inline_settings_round_trip_through_the_backend() {
         panic!("settings")
     };
     assert!(s.enabled && s.provider.as_ref().map(|p| p.as_str()) == Some("fake"));
+}
+
+// ---- export, friendly errors and logging --------------------------------------------------
+
+use application::export::ExportFormat;
+use application::usecases::ExportOptions;
+use ui_egui::ExportDone;
+
+struct ExportEnv {
+    backend: Backend,
+    events: Receiver<Event>,
+    driver: FakeDriver,
+    dir: tempfile::TempDir,
+}
+
+fn export_env(row_count: i64, max_rows: u32) -> ExportEnv {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let result = QueryResult {
+        columns: vec![
+            ResultColumn {
+                name: "id".into(),
+                data_type: domain::DataType::new("int"),
+            },
+            ResultColumn {
+                name: "name".into(),
+                data_type: domain::DataType::new("text"),
+            },
+        ],
+        rows: (1..=row_count)
+            .map(|i| vec![Value::Int(i), Value::Text(format!("n{i}"))])
+            .collect(),
+        ..QueryResult::empty()
+    };
+    let driver = FakeDriver::new("fake").with_result(result);
+    let mut drivers = DriverRegistry::new();
+    drivers.register(Arc::new(driver.clone()));
+    let use_cases = UseCases::new(
+        Ports {
+            connections: Arc::new(InMemoryConnections::default()),
+            history: Arc::new(InMemoryHistory::default()),
+            secrets: Arc::new(InMemorySecrets::default()),
+            clock: Arc::new(SystemClock),
+            drivers: Arc::new(drivers),
+            providers: Arc::new(LlmRegistry::new()),
+            settings: Arc::new(InMemorySettings::default()),
+        },
+        ExecuteOptions::default(),
+    )
+    .with_export(ExportOptions {
+        directory: dir.path().to_path_buf(),
+        max_rows,
+    });
+    let (backend, events) = Backend::spawn(Arc::new(use_cases), || {});
+    ExportEnv {
+        backend,
+        events,
+        driver,
+        dir,
+    }
+}
+
+impl ExportEnv {
+    fn connect(&self, read_only: bool) -> (SessionId, domain::ConnectionId) {
+        let mut profile = ConnectionProfile::new("c", DriverKind::new("fake"), "localhost");
+        profile.set_read_only(read_only);
+        let id = profile.id;
+        self.backend.send(Command::SaveConnection {
+            profile,
+            password: None,
+        });
+        assert!(matches!(next(&self.events), Event::Saved(Ok(_))));
+        self.backend.send(Command::Connect(id));
+        let Event::Connected {
+            result: Ok(session),
+            ..
+        } = next(&self.events)
+        else {
+            panic!("connect")
+        };
+        (session, id)
+    }
+
+    fn export(
+        &self,
+        s: (SessionId, domain::ConnectionId),
+        sql: &str,
+        format: ExportFormat,
+        name: &str,
+    ) -> Result<ExportDone, String> {
+        self.backend.send(Command::Export {
+            tab: TabId(1),
+            session: s.0,
+            connection: s.1,
+            text: sql.into(),
+            format,
+            name: name.into(),
+        });
+        let Event::Exported { result, .. } = next(&self.events) else {
+            panic!("expected Exported")
+        };
+        result
+    }
+}
+
+#[test]
+fn exports_write_a_new_file_with_the_full_result() {
+    let e = export_env(3, 100);
+    let s = e.connect(false);
+    let done = e
+        .export(s, "select * from t", ExportFormat::Csv, "people")
+        .expect("export");
+    assert_eq!(done.path, e.dir.path().join("people.csv"));
+    assert_eq!((done.rows, done.truncated), (3, false));
+    assert_eq!(
+        std::fs::read_to_string(&done.path).expect("file"),
+        "id,name\r\n1,n1\r\n2,n2\r\n3,n3\r\n"
+    );
+
+    let json = e
+        .export(s, "select * from t", ExportFormat::Json, "people")
+        .expect("json");
+    assert_eq!(json.path, e.dir.path().join("people.json"));
+    assert!(
+        std::fs::read_to_string(&json.path)
+            .expect("file")
+            .contains("{\"id\": 1, \"name\": \"n1\"}")
+    );
+}
+
+#[test]
+fn the_row_cap_truncates_the_export_and_says_so() {
+    let e = export_env(10, 4);
+    let s = e.connect(false);
+    let done = e
+        .export(s, "select * from t", ExportFormat::Csv, "capped")
+        .expect("export");
+    assert_eq!((done.rows, done.truncated), (4, true));
+    assert_eq!(
+        std::fs::read_to_string(&done.path)
+            .expect("file")
+            .lines()
+            .count(),
+        5
+    );
+}
+
+#[test]
+fn an_existing_file_is_never_overwritten() {
+    let e = export_env(3, 100);
+    let s = e.connect(false);
+    std::fs::write(e.dir.path().join("keep.csv"), "precious").expect("seed");
+    let err = e
+        .export(s, "select * from t", ExportFormat::Csv, "keep")
+        .expect_err("must refuse");
+    assert!(
+        err.contains("already exists") && err.contains("never overwritten"),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(e.dir.path().join("keep.csv")).expect("file"),
+        "precious"
+    );
+    // The refusal happened before running anything.
+    assert!(e.driver.executed().is_empty());
+}
+
+#[test]
+fn a_blocked_or_empty_export_leaves_no_file_behind() {
+    let e = export_env(3, 100);
+    let ro = e.connect(true);
+    let err = e
+        .export(ro, "DELETE FROM t RETURNING *", ExportFormat::Csv, "nope")
+        .expect_err("blocked");
+    assert!(err.contains("Read-only mode"), "{err}");
+    assert!(
+        err.contains("Hint:") && err.contains("Turn off read-only mode"),
+        "friendly text: {err}"
+    );
+    assert!(!e.dir.path().join("nope.csv").exists(), "no partial file");
+    assert!(
+        e.driver.executed().is_empty(),
+        "nothing reached the database"
+    );
+}
+
+#[test]
+fn exporting_from_a_closed_session_or_with_a_bad_name_fails_cleanly() {
+    let e = export_env(1, 10);
+    let (_, id) = e.connect(false);
+    let err = e
+        .export((SessionId(99), id), "select 1", ExportFormat::Csv, "x")
+        .expect_err("closed");
+    assert!(err.contains("closed"), "{err}");
+    let s = e.connect(false);
+    assert!(
+        e.export(s, "select 1", ExportFormat::Csv, "folder/")
+            .is_err()
+    );
+}
+
+#[test]
+fn query_errors_reach_the_ui_with_a_hint() {
+    let e = export_env(1, 10);
+    let (session, id) = e.connect(true);
+    e.backend.send(Command::Execute {
+        tab: TabId(1),
+        session,
+        connection: id,
+        text: "DROP TABLE t".into(),
+    });
+    let Event::QueryFinished {
+        result: Err(message),
+        ..
+    } = next(&e.events)
+    else {
+        panic!("blocked")
+    };
+    let lines: Vec<&str> = message.lines().collect();
+    assert!(lines[0].starts_with("Read-only mode"), "{message}");
+    assert!(lines[1].starts_with("Hint: "), "{message}");
+}
+
+mod logging {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn captured() -> Arc<Mutex<Vec<u8>>> {
+        static BUFFER: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+        BUFFER
+            .get_or_init(|| {
+                let buffer = Arc::new(Mutex::new(Vec::new()));
+                let writer = Capture(buffer.clone());
+                let subscriber = tracing_subscriber::fmt()
+                    .with_writer(move || writer.clone())
+                    .with_ansi(false)
+                    .finish();
+                let _ = tracing::subscriber::set_global_default(subscriber);
+                buffer
+            })
+            .clone()
+    }
+
+    #[test]
+    fn logs_describe_what_happened_without_sql_prompts_rows_or_keys() {
+        let buffer = captured();
+        let llm = FakeLlm::new("fake", &["ok"]);
+        let (backend, events, _, _) = ai_env(&llm);
+
+        let profile = ConnectionProfile::new("c", DriverKind::new("fake"), "localhost");
+        let id = profile.id;
+        backend.send(Command::SaveConnection {
+            profile,
+            password: Some(SecretString::from("PASSWORD-ABC123")),
+        });
+        assert!(matches!(next(&events), Event::Saved(Ok(_))));
+        backend.send(Command::Connect(id));
+        let Event::Connected {
+            result: Ok(session),
+            ..
+        } = next(&events)
+        else {
+            panic!("connect")
+        };
+        backend.send(Command::Execute {
+            tab: TabId(1),
+            session,
+            connection: id,
+            text: "SELECT 'TOP-SECRET-LITERAL'".into(),
+        });
+        assert!(matches!(
+            next(&events),
+            Event::QueryFinished { result: Ok(_), .. }
+        ));
+
+        let rows = QueryResult {
+            columns: vec![ResultColumn {
+                name: "name".into(),
+                data_type: domain::DataType::new("text"),
+            }],
+            rows: vec![vec![Value::Text("ROW-DATA-VALUE".into())]],
+            ..QueryResult::empty()
+        };
+        backend.send(Command::AiAsk(Box::new(ask(
+            1,
+            "fake",
+            generate("PRIVATE-QUESTION-TEXT"),
+            Some(rows),
+        ))));
+        while !matches!(next(&events), Event::AiFinished { .. }) {}
+
+        let log = String::from_utf8(buffer.lock().expect("lock").clone()).expect("utf8");
+        assert!(
+            log.contains("connected")
+                && log.contains("query finished")
+                && log.contains("ai request finished"),
+            "{log}"
+        );
+        for secret in [
+            "TOP-SECRET-LITERAL",
+            "PRIVATE-QUESTION-TEXT",
+            "ROW-DATA-VALUE",
+            "PASSWORD-ABC123",
+        ] {
+            assert!(!log.contains(secret), "the log leaked `{secret}`:\n{log}");
+        }
+    }
 }

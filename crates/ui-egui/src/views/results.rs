@@ -1,6 +1,8 @@
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
+use application::export::ExportFormat;
+
 use crate::presenter::{Presenter, TabState};
 
 const ROW_HEIGHT: f32 = 20.0;
@@ -42,7 +44,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
                 result.elapsed.as_millis()
             );
             if result.truncated {
-                summary.push_str(" (more rows exist; result limited)");
+                summary.push_str(" (limited: more rows exist; Export saves more)");
             }
             ui.weak(summary);
 
@@ -80,5 +82,47 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
     }
     if fix {
         p.ai_fix_last_error();
+    }
+}
+
+/// Export controls above the grid: format, file name and the button. Shown only for a result
+/// with columns. The export re-runs the statement, so it can hold more rows than the grid.
+pub fn export_controls(ui: &mut egui::Ui, p: &mut Presenter) {
+    let exportable = p
+        .selected_tab()
+        .is_some_and(|t| matches!(&t.state, TabState::Done(r) if !r.columns.is_empty()));
+    if !exportable {
+        return;
+    }
+    let mut export = false;
+    ui.horizontal(|ui| {
+        ui.label("Export");
+        egui::ComboBox::from_id_salt("export_format")
+            .width(70.0)
+            .selected_text(match p.export.format {
+                ExportFormat::Csv => "CSV",
+                ExportFormat::Json => "JSON",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut p.export.format, ExportFormat::Csv, "CSV");
+                ui.selectable_value(&mut p.export.format, ExportFormat::Json, "JSON");
+            });
+        ui.add(
+            egui::TextEdit::singleline(&mut p.export.name)
+                .hint_text("file name (optional)")
+                .desired_width(170.0),
+        );
+        export = ui
+            .add_enabled(!p.export.running, egui::Button::new("Save"))
+            .on_hover_text(
+                "Re-runs the query and writes a new file. Existing files are never overwritten.",
+            )
+            .clicked();
+        if p.export.running {
+            ui.spinner();
+        }
+    });
+    if export {
+        p.export_selected();
     }
 }

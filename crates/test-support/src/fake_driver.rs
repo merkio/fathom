@@ -108,7 +108,15 @@ impl DbSession for FakeSession {
 
     async fn execute(&self, req: QueryRequest) -> Result<QueryResult, DbError> {
         lock(&self.executed).push(req.text);
-        Ok(self.result.clone())
+        let mut result = self.result.clone();
+        // Like a real driver: honour the row limit and say when rows were left out.
+        if let Some(limit) = req.row_limit.map(|l| l as usize)
+            && result.rows.len() > limit
+        {
+            result.rows.truncate(limit);
+            result.truncated = true;
+        }
+        Ok(result)
     }
 
     async fn cancel(&self) -> Result<(), DbError> {

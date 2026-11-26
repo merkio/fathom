@@ -1,6 +1,7 @@
 //! Wiring helper: builds every use case from the ports once, so `app` stays a thin composition
 //! root and the UI receives ready-made use cases.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use domain::{DriverKind, ProviderId};
@@ -29,6 +30,23 @@ pub struct Ports {
 /// Token budget for the schema part of a prompt.
 const SCHEMA_TOKEN_BUDGET: usize = 3000;
 
+/// Where exports go and how many rows they may hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportOptions {
+    /// Relative export names are placed here.
+    pub directory: PathBuf,
+    pub max_rows: u32,
+}
+
+impl Default for ExportOptions {
+    fn default() -> Self {
+        Self {
+            directory: PathBuf::from("."),
+            max_rows: crate::usecases::DEFAULT_MAX_EXPORT_ROWS,
+        }
+    }
+}
+
 pub struct UseCases {
     pub list_connections: ListConnections,
     pub save_connection: SaveConnection,
@@ -44,6 +62,7 @@ pub struct UseCases {
     pub api_keys: ApiKeys,
     pub list_models: ListModels,
     pub suggest_inline: SuggestInline,
+    pub export: ExportOptions,
     drivers: Arc<DriverRegistry>,
     providers: Arc<LlmRegistry>,
 }
@@ -71,6 +90,7 @@ impl UseCases {
             query_history: QueryHistory::new(history),
             assistant: Assistant::new(providers.clone(), SCHEMA_TOKEN_BUDGET),
             suggest_inline: SuggestInline::new(providers.clone(), settings.clone()),
+            export: ExportOptions::default(),
             ai_settings: AiSettingsStore::new(settings),
             api_keys: ApiKeys::new(providers.clone(), secrets),
             list_models: ListModels::new(providers.clone()),
@@ -82,6 +102,12 @@ impl UseCases {
     /// Each connectable database kind with its dialect (keywords, quoting) for the editor.
     pub fn dialects(&self) -> Vec<(DriverKind, domain::Dialect)> {
         self.drivers.dialects()
+    }
+
+    /// Sets where exports are written and their row cap.
+    pub fn with_export(mut self, export: ExportOptions) -> Self {
+        self.export = export;
+        self
     }
 
     /// The dialect of a database kind, or the ANSI default if the kind is unknown.
