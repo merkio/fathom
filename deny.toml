@@ -17,6 +17,10 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
+    "BSL-1.0",                  # clipboard-win, error-code (egui/arboard)
+    "CDLA-Permissive-2.0",      # webpki-root-certs (CA bundle data)
+    "OFL-1.1",                  # egui default fonts
+    "Ubuntu-font-1.0",          # egui default fonts
 ]
 
 [bans]

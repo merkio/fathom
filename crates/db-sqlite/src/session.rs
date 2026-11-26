@@ -45,7 +45,6 @@ fn run(conn: &Connection, text: &str, limit: Option<usize>) -> Result<QueryResul
     let mut stmt = conn.prepare(text).map_err(map_error)?;
     let columns: Vec<ResultColumn> = stmt
         .columns()
-        .iter()
         .map(|c| ResultColumn {
             name: c.name().to_owned(),
             data_type: DataType::new(c.decl_type().map_or("any".to_owned(), str::to_lowercase)),
