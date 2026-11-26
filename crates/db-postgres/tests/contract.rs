@@ -18,11 +18,15 @@ use test_support::driver_contract::{DriverFixture, Sleeper, run_database_driver_
 async fn postgres_passes_the_driver_contract() {
     let s = common::server().await;
     let (profile, password) = common::profile_for(&s);
+    // Nothing listens on port 1.
+    let mut unreachable = profile.clone();
+    unreachable.port = Some(1);
 
     let fixture = DriverFixture {
         profile,
         password: Some(password),
-        wrong_password: SecretString::from("definitely-not-the-password"),
+        wrong_password: Some(SecretString::from("definitely-not-the-password")),
+        unreachable,
         setup: vec![
             "CREATE TABLE contract_parent (id integer PRIMARY KEY, name text NOT NULL, note text)"
                 .into(),

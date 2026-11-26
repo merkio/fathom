@@ -20,8 +20,12 @@ pub type Sleeper = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>
 pub struct DriverFixture {
     pub profile: ConnectionProfile,
     pub password: Option<SecretString>,
-    /// A password the server must reject.
-    pub wrong_password: SecretString,
+    /// A password the server must reject. `None` for databases without authentication (for
+    /// example a local file), which skip that check.
+    pub wrong_password: Option<SecretString>,
+    /// A profile that cannot be reached (nothing listens there, or the file does not exist).
+    /// Connecting must fail with `DbError::Connection`.
+    pub unreachable: ConnectionProfile,
     /// Creates `contract_parent(id PK, name NOT NULL, note NULL)` and
     /// `contract_child(id PK, parent_id FK -> contract_parent(id), label)` with a plain
     /// (non-unique) index on `contract_child(parent_id)`.
@@ -102,21 +106,22 @@ fn metadata(driver: &dyn DatabaseDriver) {
 }
 
 async fn connection_errors(driver: &dyn DatabaseDriver, f: &DriverFixture) {
-    let bad = driver
-        .connect(&f.profile, Some(f.wrong_password.clone()))
-        .await
-        .err();
-    assert_eq!(
-        bad,
-        Some(DbError::Authentication),
-        "contract: wrong password"
-    );
+    if let Some(wrong) = &f.wrong_password {
+        let bad = driver.connect(&f.profile, Some(wrong.clone())).await.err();
+        assert_eq!(
+            bad,
+            Some(DbError::Authentication),
+            "contract: wrong password"
+        );
+    }
 
-    let mut unreachable = f.profile.clone();
-    unreachable.port = Some(1);
-    match driver.connect(&unreachable, f.password.clone()).await.err() {
+    match driver
+        .connect(&f.unreachable, f.password.clone())
+        .await
+        .err()
+    {
         Some(DbError::Connection(_)) => {}
-        other => panic!("contract: unreachable server gave {other:?}"),
+        other => panic!("contract: unreachable target gave {other:?}"),
     }
 }
 
