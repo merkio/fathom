@@ -6,3 +6,10 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+domain = { path = "../domain" }
+async-trait = "0.1"
+futures = "0.3"
+secrecy = "0.10"
+thiserror = "2"
