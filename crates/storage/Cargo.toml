@@ -6,3 +6,23 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+domain = { path = "../domain" }
+application = { path = "../application" }
+async-trait = "0.1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+secrecy = "0.10"
+uuid = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
+[dev-dependencies]
+futures = "0.3"
+tempfile = "3"
+test-support = { path = "../test-support" }
