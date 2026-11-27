@@ -6,7 +6,7 @@ use secrecy::SecretString;
 
 use crate::session::SqliteSession;
 
-const SQLITE_DIALECT: Dialect = Dialect {
+pub(crate) const SQLITE_DIALECT: Dialect = Dialect {
     name: "sqlite",
     identifier_quote: '"',
     // SQLite compares identifiers case-insensitively, so mixed case needs no quoting.

@@ -49,6 +49,8 @@ async fn clickhouse_passes_the_driver_contract() {
         capabilities: Capabilities {
             foreign_keys: false,
             update_row_counts: false,
+            atomic_changes: false,
+            detects_missing_rows: false,
         },
     };
     let sleep: Sleeper = Arc::new(|d: Duration| Box::pin(tokio::time::sleep(d)));

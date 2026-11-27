@@ -3,9 +3,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use application::ports::{DbError, DbSession, IntrospectScope};
+use application::sql::changes::{self, BuildOptions, ParamStyle};
 use async_trait::async_trait;
 use clickhouse::Client;
-use domain::{DataType, QueryLanguage, QueryRequest, QueryResult, ResultColumn, SchemaTree, Value};
+use domain::{
+    ApplyOutcome, DataType, QueryLanguage, QueryRequest, QueryResult, ResultColumn, SchemaTree,
+    TableChanges, Value,
+};
 use serde_json::Value as Json;
 
 use crate::error::map_error;
@@ -197,6 +201,47 @@ impl DbSession for ClickHouseSession {
             }
             other => other,
         }
+    }
+
+    async fn apply_changes(&self, edits: TableChanges) -> Result<ApplyOutcome, DbError> {
+        // ClickHouse has no transactions: edits are `ALTER TABLE .. UPDATE/DELETE` mutations,
+        // applied one by one. Each waits (`mutations_sync`) until it has finished, so a failure
+        // is reported at the statement that caused it; earlier ones stay applied.
+        let plans = changes::build(
+            BuildOptions {
+                dialect: &crate::driver::CLICKHOUSE_DIALECT,
+                style: ParamStyle::Question,
+                casts: true,
+                mutations: true,
+            },
+            &edits,
+        )?;
+        let mut applied = 0;
+        for plan in &plans {
+            let mut query = self
+                .client
+                .query(&plan.sql)
+                .with_setting("mutations_sync", "1");
+            for value in &plan.params {
+                let Value::Text(text) = value else {
+                    return Err(DbError::Query("internal: expected text parameters".into()));
+                };
+                query = query.bind(text.as_str());
+            }
+            query.execute().await.map_err(|e| {
+                let cause = map_error(e);
+                DbError::Query(format!(
+                    "{cause}; {applied} of {} changes were applied before this failed (ClickHouse has no transactions)",
+                    plans.len()
+                ))
+            })?;
+            applied += 1;
+        }
+        Ok(ApplyOutcome {
+            applied,
+            rows_affected: None,
+            atomic: false,
+        })
     }
 
     async fn cancel(&self) -> Result<(), DbError> {

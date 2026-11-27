@@ -2,8 +2,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use application::ports::{DbError, DbSession, IntrospectScope};
+use application::sql::changes::{self, BuildOptions, ParamStyle};
 use async_trait::async_trait;
-use domain::{DataType, QueryLanguage, QueryRequest, QueryResult, ResultColumn, SchemaTree};
+use domain::{
+    ApplyOutcome, DataType, QueryLanguage, QueryRequest, QueryResult, ResultColumn, SchemaTree,
+    TableChanges, Value,
+};
 use futures::StreamExt;
 use sqlx::mysql::MySqlConnection;
 use sqlx::{AssertSqlSafe, Column, Either, Executor, Row};
@@ -152,6 +156,57 @@ impl DbSession for MySqlSession {
             return Err(DbError::Cancelled);
         }
         outcome
+    }
+
+    async fn apply_changes(&self, edits: TableChanges) -> Result<ApplyOutcome, DbError> {
+        // MySQL converts a bound value to the column's type itself, so values bind natively.
+        let plans = changes::build(
+            BuildOptions {
+                dialect: &crate::dialect::MYSQL_DIALECT,
+                style: ParamStyle::Question,
+                casts: false,
+                mutations: false,
+            },
+            &edits,
+        )?;
+        let mut conn = self.conn.lock().await;
+        let mut tx = sqlx::Connection::begin(&mut *conn)
+            .await
+            .map_err(map_error)?;
+        let mut affected = 0u64;
+        for plan in &plans {
+            let mut query = sqlx::query(AssertSqlSafe(plan.sql.clone()));
+            for value in &plan.params {
+                query = match value {
+                    Value::Int(i) => query.bind(*i),
+                    Value::Float(f) => query.bind(*f),
+                    Value::Bool(b) => query.bind(*b),
+                    Value::Text(t) | Value::Decimal(t) | Value::Temporal(t) | Value::Json(t) => {
+                        query.bind(t.clone())
+                    }
+                    Value::Bytes(_) | Value::Null => {
+                        return Err(DbError::Query("internal: unsupported parameter".into()));
+                    }
+                };
+            }
+            let done = query.execute(&mut *tx).await.map_err(map_error)?;
+            // The connection asks for matched (not changed) rows, so setting a column to its
+            // current value still counts as one. Anything else means the row is gone or the
+            // key was not unique; dropping the transaction rolls everything back.
+            if done.rows_affected() != 1 {
+                return Err(DbError::Query(format!(
+                    "a change touched {} rows instead of 1 (the data changed?); nothing was applied",
+                    done.rows_affected()
+                )));
+            }
+            affected += done.rows_affected();
+        }
+        tx.commit().await.map_err(map_error)?;
+        Ok(ApplyOutcome {
+            applied: plans.len(),
+            rows_affected: Some(affected),
+            atomic: true,
+        })
     }
 
     async fn cancel(&self) -> Result<(), DbError> {

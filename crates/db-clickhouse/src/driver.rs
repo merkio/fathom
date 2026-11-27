@@ -7,7 +7,7 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::error::map_error;
 use crate::session::ClickHouseSession;
 
-const CLICKHOUSE_DIALECT: Dialect = Dialect {
+pub(crate) const CLICKHOUSE_DIALECT: Dialect = Dialect {
     name: "clickhouse",
     identifier_quote: '`',
     // Identifiers are case-sensitive.

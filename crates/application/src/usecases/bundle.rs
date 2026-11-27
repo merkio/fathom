@@ -11,9 +11,10 @@ use crate::ports::{
 };
 use crate::registry::{DriverRegistry, LlmRegistry};
 use crate::usecases::{
-    AiSettingsStore, ApiKeys, Assistant, BrowseSchema, CloseSession, DeleteConnection,
-    ExecuteOptions, ExecuteQuery, ExplorerVisibilityStore, ListConnections, ListModels,
-    OpenSession, QueryHistory, SaveConnection, SuggestInline, TestConnection, UiPrefsStore,
+    AiSettingsStore, ApiKeys, ApplyChanges, Assistant, BrowseSchema, CloseSession,
+    DeleteConnection, ExecuteOptions, ExecuteQuery, ExplorerVisibilityStore, ListConnections,
+    ListModels, OpenSession, QueryHistory, SaveConnection, SuggestInline, TestConnection,
+    UiPrefsStore,
 };
 
 /// The adapters (as ports) the use cases need.
@@ -56,6 +57,7 @@ pub struct UseCases {
     pub close_session: CloseSession,
     pub browse_schema: BrowseSchema,
     pub execute_query: ExecuteQuery,
+    pub apply_changes: ApplyChanges,
     pub query_history: QueryHistory,
     pub assistant: Assistant,
     pub ai_settings: AiSettingsStore,
@@ -89,6 +91,7 @@ impl UseCases {
             close_session: CloseSession,
             browse_schema: BrowseSchema,
             execute_query: ExecuteQuery::new(history.clone(), clock, options),
+            apply_changes: ApplyChanges,
             query_history: QueryHistory::new(history),
             assistant: Assistant::new(providers.clone(), SCHEMA_TOKEN_BUDGET),
             suggest_inline: SuggestInline::new(providers.clone(), settings.clone()),

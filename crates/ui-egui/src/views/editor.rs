@@ -51,6 +51,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
             .min_size(120.0)
             .show(ui, |ui| {
                 super::results::export_controls(ui, p);
+                super::results::edit_bar(ui, p);
                 super::results::show(ui, p);
             });
     }

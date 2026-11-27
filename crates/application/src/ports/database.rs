@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use domain::{ConnectionProfile, Dialect, DriverKind, QueryRequest, QueryResult, SchemaTree};
+use domain::{
+    ApplyOutcome, ConnectionProfile, Dialect, DriverKind, QueryRequest, QueryResult, SchemaTree,
+    TableChanges,
+};
 use secrecy::SecretString;
 use thiserror::Error;
 
@@ -47,5 +50,14 @@ pub trait DbSession: Send + Sync {
     async fn execute(&self, req: QueryRequest) -> Result<QueryResult, DbError>;
     /// Cancels the statement currently running on this session, if any.
     async fn cancel(&self) -> Result<(), DbError>;
+    /// Applies staged row edits. Every change is keyed by primary key and bound as a parameter
+    /// (build the statements with `sql::changes::build`). Databases with transactions apply the
+    /// whole batch atomically and roll back on any failure; the rest stop at the first failure.
+    /// The default says the database cannot do it.
+    async fn apply_changes(&self, _changes: TableChanges) -> Result<ApplyOutcome, DbError> {
+        Err(DbError::Unsupported(
+            "this database cannot apply row edits".into(),
+        ))
+    }
     async fn close(self: Box<Self>);
 }

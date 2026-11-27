@@ -340,6 +340,37 @@ async fn handle(sh: Arc<Shared>, command: Command) {
                 ))));
             }
         }
+        Command::ApplyChanges {
+            tab,
+            session,
+            changes,
+        } => {
+            let count = changes.changes.len();
+            let result = match sh.session(session).await {
+                Ok(open) => uc
+                    .apply_changes
+                    .apply(open.session.as_ref(), open.read_only, changes)
+                    .await
+                    .map_err(text),
+                Err(e) => Err(e),
+            };
+            // Counts only: the values and the table contents stay out of the log.
+            match &result {
+                Ok(outcome) => tracing::info!(
+                    session = session.0,
+                    applied = outcome.applied,
+                    atomic = outcome.atomic,
+                    "row changes applied"
+                ),
+                Err(message) => tracing::warn!(
+                    session = session.0,
+                    requested = count,
+                    error = %redact(message),
+                    "row changes failed"
+                ),
+            }
+            sh.emit(Event::ChangesApplied { tab, result });
+        }
         Command::LoadVisibility(connection) => {
             let result = uc
                 .explorer_visibility

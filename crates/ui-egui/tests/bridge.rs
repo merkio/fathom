@@ -1044,6 +1044,49 @@ impl ExportEnv {
     }
 }
 
+fn one_delete() -> domain::TableChanges {
+    domain::TableChanges {
+        schema: None,
+        table: "t".into(),
+        column_types: vec![],
+        changes: vec![domain::RowChange::Delete {
+            key: vec![("id".into(), Value::Int(1))],
+        }],
+    }
+}
+
+#[test]
+fn applying_changes_is_blocked_on_a_read_only_connection() {
+    let e = export_env(1, 100);
+    let (session, _) = e.connect(true);
+    e.backend.send(Command::ApplyChanges {
+        tab: TabId(1),
+        session,
+        changes: one_delete(),
+    });
+    let Event::ChangesApplied { result, .. } = next(&e.events) else {
+        panic!("expected ChangesApplied")
+    };
+    let message = result.expect_err("read-only must refuse");
+    assert!(message.contains("read-only"), "{message}");
+}
+
+#[test]
+fn a_database_without_row_editing_reports_it_instead_of_pretending() {
+    // The fake driver does not override `apply_changes`, like any adapter that cannot edit rows.
+    let e = export_env(1, 100);
+    let (session, _) = e.connect(false);
+    e.backend.send(Command::ApplyChanges {
+        tab: TabId(1),
+        session,
+        changes: one_delete(),
+    });
+    let Event::ChangesApplied { result, .. } = next(&e.events) else {
+        panic!("expected ChangesApplied")
+    };
+    assert!(result.is_err(), "{result:?}");
+}
+
 #[test]
 fn exports_write_a_new_file_with_the_full_result() {
     let e = export_env(3, 100);

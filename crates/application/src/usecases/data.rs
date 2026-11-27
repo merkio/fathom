@@ -133,3 +133,135 @@ impl QueryHistory {
         Ok(self.history.recent(connection, limit).await?)
     }
 }
+
+/// Applies the row edits a user staged in a result grid.
+///
+/// The statements are generated from structured changes (never from text), keyed by primary key
+/// and bound as parameters; nothing is applied unless the caller passes the user's explicit
+/// confirmation by calling this at all, and never on a read-only connection.
+pub struct ApplyChanges;
+
+impl ApplyChanges {
+    pub async fn apply(
+        &self,
+        session: &dyn crate::ports::DbSession,
+        read_only: bool,
+        changes: domain::TableChanges,
+    ) -> Result<domain::ApplyOutcome, crate::error::UseCaseError> {
+        if read_only {
+            return Err(crate::error::UseCaseError::Blocked(
+                "This connection is read-only, so nothing was changed.".into(),
+            ));
+        }
+        if changes.changes.is_empty() {
+            return Err(crate::error::UseCaseError::Blocked(
+                "There are no changes to apply.".into(),
+            ));
+        }
+        Ok(session.apply_changes(changes).await?)
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use domain::{
+        ApplyOutcome, QueryRequest, QueryResult, RowChange, SchemaTree, TableChanges, Value,
+    };
+
+    use super::*;
+    use crate::error::UseCaseError;
+    use crate::ports::{DbError, DbSession, IntrospectScope};
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<TableChanges>>);
+
+    #[async_trait]
+    impl DbSession for Recorder {
+        async fn introspect(&self, _: IntrospectScope) -> Result<SchemaTree, DbError> {
+            Ok(SchemaTree::default())
+        }
+        async fn execute(&self, _: QueryRequest) -> Result<QueryResult, DbError> {
+            Ok(QueryResult::empty())
+        }
+        async fn cancel(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn apply_changes(&self, c: TableChanges) -> Result<ApplyOutcome, DbError> {
+            let n = c.changes.len();
+            self.0.lock().unwrap().push(c);
+            Ok(ApplyOutcome {
+                applied: n,
+                rows_affected: Some(n as u64),
+                atomic: true,
+            })
+        }
+        async fn close(self: Box<Self>) {}
+    }
+
+    /// A session that does not override `apply_changes`.
+    struct Plain;
+
+    #[async_trait]
+    impl DbSession for Plain {
+        async fn introspect(&self, _: IntrospectScope) -> Result<SchemaTree, DbError> {
+            Ok(SchemaTree::default())
+        }
+        async fn execute(&self, _: QueryRequest) -> Result<QueryResult, DbError> {
+            Ok(QueryResult::empty())
+        }
+        async fn cancel(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn close(self: Box<Self>) {}
+    }
+
+    fn one_change() -> TableChanges {
+        TableChanges {
+            schema: None,
+            table: "t".into(),
+            column_types: vec![],
+            changes: vec![RowChange::Delete {
+                key: vec![("id".into(), Value::Int(1))],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_read_only_connection_never_reaches_the_database() {
+        let session = Recorder::default();
+        let err = futures::executor::block_on(ApplyChanges.apply(&session, true, one_change()));
+        assert!(matches!(err, Err(UseCaseError::Blocked(_))));
+        assert!(session.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_empty_batch_is_refused() {
+        let mut empty = one_change();
+        empty.changes.clear();
+        let session = Recorder::default();
+        let err = futures::executor::block_on(ApplyChanges.apply(&session, false, empty));
+        assert!(matches!(err, Err(UseCaseError::Blocked(_))));
+        assert!(session.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn changes_reach_the_session_untouched() {
+        let session = Recorder::default();
+        let out =
+            futures::executor::block_on(ApplyChanges.apply(&session, false, one_change())).unwrap();
+        assert_eq!(out.applied, 1);
+        assert_eq!(session.0.lock().unwrap().as_slice(), [one_change()]);
+    }
+
+    #[test]
+    fn databases_without_support_say_so() {
+        let err = futures::executor::block_on(ApplyChanges.apply(&Plain, false, one_change()));
+        assert!(matches!(
+            err,
+            Err(UseCaseError::Db(DbError::Unsupported(_)))
+        ));
+    }
+}
