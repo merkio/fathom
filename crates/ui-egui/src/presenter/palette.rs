@@ -20,6 +20,7 @@ pub enum PaletteAction {
     ToggleSidePanel,
     Theme(ThemePreference),
     NewQuery,
+    ManageInstances,
     OpenTable {
         session: SessionId,
         schema: String,
@@ -68,6 +69,13 @@ fn matches(query: &str, it: &PaletteItem) -> bool {
     query
         .split_whitespace()
         .all(|word| hay.contains(&word.to_lowercase()))
+}
+
+fn title_matches(query: &str, it: &PaletteItem) -> bool {
+    let title = it.title.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|word| title.contains(&word.to_lowercase()))
 }
 
 impl Presenter {
@@ -144,6 +152,14 @@ impl Presenter {
                 None,
             ),
             item(
+                PaletteAction::ManageInstances,
+                "Workspace",
+                "Database instances",
+                "Choose which databases the explorer shows",
+                None,
+                None,
+            ),
+            item(
                 PaletteAction::Theme(ThemePreference::Light),
                 "Appearance",
                 "Theme: light",
@@ -169,6 +185,8 @@ impl Presenter {
             ),
         ];
         items.retain(|it| matches(&state.query, it));
+        // Matches in the title come before matches that are only in the description.
+        items.sort_by_key(|it| !title_matches(&state.query, it));
 
         if !state.query.trim().is_empty() {
             let tables = self.open.iter().flat_map(|o| {
@@ -236,6 +254,7 @@ impl Presenter {
             }
             PaletteAction::ToggleSidePanel => self.toggle_side_panel(),
             PaletteAction::Theme(theme) => self.set_theme(theme),
+            PaletteAction::ManageInstances => self.open_instances(None),
             PaletteAction::NewQuery => {
                 let session = self
                     .selected_tab()

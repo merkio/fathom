@@ -340,6 +340,24 @@ async fn handle(sh: Arc<Shared>, command: Command) {
                 ))));
             }
         }
+        Command::LoadVisibility(connection) => {
+            let result = uc
+                .explorer_visibility
+                .load(connection)
+                .await
+                .map_err(|e| text(UseCaseError::Storage(e)));
+            sh.emit(Event::Visibility { connection, result });
+        }
+        Command::SaveVisibility {
+            connection,
+            visible,
+        } => {
+            if let Err(e) = uc.explorer_visibility.save(connection, &visible).await {
+                sh.emit(Event::Notice(Err(format!(
+                    "Could not save the explorer choice: {e}"
+                ))));
+            }
+        }
         Command::LoadUiPrefs => {
             let result = uc
                 .ui_prefs

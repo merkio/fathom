@@ -6,6 +6,7 @@ mod code_editor;
 mod connections;
 mod editor;
 mod history;
+mod instances;
 mod palette;
 mod results;
 mod schema;
@@ -68,6 +69,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
         .frame(Frame::NONE.fill(pal.bg))
         .show(ui, |ui| editor::show(ui, p));
     connections::show_form(ui.ctx(), p);
+    instances::show(ui.ctx(), p);
     palette::show(ui.ctx(), p);
 }
 

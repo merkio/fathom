@@ -46,7 +46,13 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
                             Load::Failed(e) => {
                                 ui.colored_label(ui.visuals().error_fg_color, e);
                             }
-                            Load::Ready(tree) => tree_view(ui, open.session, tree, &filter),
+                            Load::Ready(tree) => tree_view(
+                                ui,
+                                open.session,
+                                tree,
+                                &filter,
+                                p.visibility.get(&open.connection),
+                            ),
                         }
                     });
             }
@@ -63,9 +69,19 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
     }
 }
 
-fn tree_view(ui: &mut egui::Ui, session: SessionId, tree: &domain::SchemaTree, filter: &str) {
+fn tree_view(
+    ui: &mut egui::Ui,
+    session: SessionId,
+    tree: &domain::SchemaTree,
+    filter: &str,
+    visible: Option<&Vec<String>>,
+) {
     for catalog in &tree.catalogs {
-        for schema in &catalog.schemas {
+        for schema in catalog
+            .schemas
+            .iter()
+            .filter(|s| visible.is_none_or(|v| v.contains(&s.name)))
+        {
             egui::CollapsingHeader::new(&schema.name)
                 .id_salt((session.0, &catalog.name, &schema.name))
                 .default_open(schema.tables.len() < 40)

@@ -134,6 +134,12 @@ pub enum Command {
     SaveInlineSettings(InlineSettings),
     LoadUiPrefs,
     SaveUiPrefs(UiPrefs),
+    /// Which databases of an instance the explorer shows.
+    LoadVisibility(ConnectionId),
+    SaveVisibility {
+        connection: ConnectionId,
+        visible: Vec<String>,
+    },
     /// Re-runs `text` (up to the export row cap) and writes the result to a new file.
     Export {
         tab: TabId,
@@ -154,6 +160,7 @@ impl Command {
             Command::SaveAiSettings(_)
                 | Command::SaveInlineSettings(_)
                 | Command::SaveUiPrefs(_)
+                | Command::SaveVisibility { .. }
                 | Command::SaveApiKey { .. }
                 | Command::ClearApiKey(_)
         )
@@ -228,6 +235,11 @@ pub enum Event {
     },
     InlineSettings(Result<InlineSettings, String>),
     UiPrefs(Result<UiPrefs, String>),
+    /// `None`: the user has not chosen yet (everything is shown).
+    Visibility {
+        connection: ConnectionId,
+        result: Result<Option<Vec<String>>, String>,
+    },
     Exported {
         tab: TabId,
         result: Result<ExportDone, String>,

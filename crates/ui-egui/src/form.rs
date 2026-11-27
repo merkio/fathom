@@ -66,6 +66,8 @@ pub struct ConnectionForm {
     /// Driver-specific options, one `key=value` per line (for example `sslmode=verify-full`).
     /// `read_only` and `inline_ai` have their own controls and are not listed here.
     pub extra_options: String,
+    /// Which tab of the dialog is showing (view state, not part of the profile).
+    pub show_advanced: bool,
     /// Entered text only; moved into a `SecretString` on submit and never stored in a profile.
     pub password: String,
 }
@@ -105,6 +107,7 @@ impl ConnectionForm {
             read_only: p.read_only(),
             inline_ai: p.inline_ai(),
             extra_options: format_options(p),
+            show_advanced: false,
             password: String::new(),
         }
     }

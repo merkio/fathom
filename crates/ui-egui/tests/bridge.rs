@@ -910,6 +910,38 @@ fn ui_prefs_round_trip_through_the_backend() {
     assert!(matches!(next(&e.events), Event::UiPrefs(Ok(p)) if p == saved));
 }
 
+#[test]
+fn explorer_visibility_round_trips_per_connection_through_the_backend() {
+    let e = inline_env(&[]);
+    let (a, b) = (domain::ConnectionId::new(), domain::ConnectionId::new());
+    e.backend.send(Command::LoadVisibility(a));
+    assert!(matches!(
+        next(&e.events),
+        Event::Visibility { connection, result: Ok(None) } if connection == a
+    ));
+    e.backend.send(Command::SaveVisibility {
+        connection: a,
+        visible: vec!["commerce".into(), "analytics".into()],
+    });
+    e.backend.send(Command::LoadVisibility(a));
+    let Event::Visibility {
+        result: Ok(Some(names)),
+        ..
+    } = next(&e.events)
+    else {
+        panic!("saved choice")
+    };
+    assert_eq!(names, ["commerce", "analytics"]);
+    e.backend.send(Command::LoadVisibility(b));
+    assert!(matches!(
+        next(&e.events),
+        Event::Visibility {
+            result: Ok(None),
+            ..
+        }
+    ));
+}
+
 // ---- export, friendly errors and logging --------------------------------------------------
 
 use application::export::ExportFormat;
@@ -1260,6 +1292,10 @@ fn only_settings_and_key_writes_are_ordered() {
         Command::SaveAiSettings(AiSettings::default()),
         Command::SaveInlineSettings(InlineSettings::default()),
         Command::SaveUiPrefs(application::usecases::UiPrefs::default()),
+        Command::SaveVisibility {
+            connection: domain::ConnectionId::new(),
+            visible: vec![],
+        },
         Command::ClearApiKey(domain::ProviderId::new("p")),
     ];
     assert!(ordered.iter().all(Command::is_ordered));
