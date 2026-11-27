@@ -16,12 +16,9 @@ rusqlite = { version = "0.43", features = ["bundled"] }
 secrecy = "0.10"
 uuid = "1"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", features = ["apple-native"] }
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "3", features = ["windows-native"] }
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+# The `v1` feature (default) picks the platform credential store: Keychain on macOS, Credential
+# Manager on Windows, the Secret Service (pure Rust, over D-Bus) on Linux.
+keyring = "4"
 
 [dev-dependencies]
 futures = "0.3"
