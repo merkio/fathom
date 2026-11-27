@@ -14,7 +14,7 @@
 
 ## Design refresh (from the Figma mock-up)
 - [x] D1. Rename to Fathom; SSH tunnelling removed from scope; themes (light/dark/system, persisted), header with breadcrumb and layout toggles, restyled explorer/tabs/editor/results/status bar. Verified by running the real app under Xvfb in both themes.
-- [ ] D2. Command palette, Database instances and Add instance dialogs.
+- [ ] D2. Command palette (done: Ctrl+K, panel toggles, themes, table search, focus mode); Database instances and Add instance dialogs (pending).
 - [x] D3. ClickHouse adapter (`db-clickhouse`, official `clickhouse` client over HTTP; one registration line in `app`). Verified locally only against an old ClickHouse 18.16 (connect, values, errors, limits, timeout, cancel); introspection, data-skipping indexes and rows-written counts run in CI against `latest` and 25.8 (LTS).
 - [ ] D4. Row editing with "Review changes" (needs `apply_changes` on the driver ports).
 - [ ] D5. Export destinations as config-enabled adapters (local, S3, SMB, NFS), storage connections, config docs.
