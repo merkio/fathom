@@ -893,6 +893,23 @@ fn inline_settings_round_trip_through_the_backend() {
     assert!(s.enabled && s.provider.as_ref().map(|p| p.as_str()) == Some("fake"));
 }
 
+#[test]
+fn ui_prefs_round_trip_through_the_backend() {
+    use application::usecases::{ThemePreference, UiPrefs};
+    let e = inline_env(&[]);
+    e.backend.send(Command::LoadUiPrefs);
+    assert!(matches!(next(&e.events), Event::UiPrefs(Ok(p)) if p == UiPrefs::default()));
+    let saved = UiPrefs {
+        theme: ThemePreference::Dark,
+        explorer: false,
+        results: true,
+        side_panel: false,
+    };
+    e.backend.send(Command::SaveUiPrefs(saved));
+    e.backend.send(Command::LoadUiPrefs);
+    assert!(matches!(next(&e.events), Event::UiPrefs(Ok(p)) if p == saved));
+}
+
 // ---- export, friendly errors and logging --------------------------------------------------
 
 use application::export::ExportFormat;
@@ -1242,6 +1259,7 @@ fn only_settings_and_key_writes_are_ordered() {
     let ordered = [
         Command::SaveAiSettings(AiSettings::default()),
         Command::SaveInlineSettings(InlineSettings::default()),
+        Command::SaveUiPrefs(application::usecases::UiPrefs::default()),
         Command::ClearApiKey(domain::ProviderId::new("p")),
     ];
     assert!(ordered.iter().all(Command::is_ordered));

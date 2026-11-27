@@ -2,9 +2,16 @@ use eframe::egui;
 
 use crate::bridge::SessionId;
 use crate::presenter::{Load, Presenter};
+use crate::theme;
 
 pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
-    ui.heading("Schema");
+    theme::section_label(ui, "Explorer");
+    ui.add(
+        egui::TextEdit::singleline(&mut p.explorer_filter)
+            .hint_text("Find an object...")
+            .desired_width(f32::INFINITY),
+    );
+    let filter = p.explorer_filter.trim().to_lowercase();
     let mut disconnect: Option<SessionId> = None;
     let mut refresh: Option<SessionId> = None;
     let mut new_tab: Option<SessionId> = None;
@@ -21,7 +28,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
                     .id_salt(open.session.0)
                     .default_open(true)
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             if ui.small_button("New query").clicked() {
                                 new_tab = Some(open.session);
                             }
@@ -39,7 +46,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
                             Load::Failed(e) => {
                                 ui.colored_label(ui.visuals().error_fg_color, e);
                             }
-                            Load::Ready(tree) => tree_view(ui, open.session, tree),
+                            Load::Ready(tree) => tree_view(ui, open.session, tree, &filter),
                         }
                     });
             }
@@ -56,14 +63,18 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
     }
 }
 
-fn tree_view(ui: &mut egui::Ui, session: SessionId, tree: &domain::SchemaTree) {
+fn tree_view(ui: &mut egui::Ui, session: SessionId, tree: &domain::SchemaTree, filter: &str) {
     for catalog in &tree.catalogs {
         for schema in &catalog.schemas {
             egui::CollapsingHeader::new(&schema.name)
                 .id_salt((session.0, &catalog.name, &schema.name))
                 .default_open(schema.tables.len() < 40)
                 .show(ui, |ui| {
-                    for table in &schema.tables {
+                    for table in schema
+                        .tables
+                        .iter()
+                        .filter(|t| matches_filter(&t.name, filter))
+                    {
                         let kind = match table.kind {
                             domain::TableKind::Table => "table",
                             domain::TableKind::View => "view",
@@ -104,5 +115,26 @@ fn tree_view(ui: &mut egui::Ui, session: SessionId, tree: &domain::SchemaTree) {
                     }
                 });
         }
+    }
+}
+
+/// Case-insensitive substring match; an empty filter matches everything. `filter` is lower-case.
+fn matches_filter(name: &str, filter: &str) -> bool {
+    filter.is_empty() || name.to_lowercase().contains(filter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_filter;
+
+    #[test]
+    fn empty_filter_matches_everything() {
+        assert!(matches_filter("customers", ""));
+    }
+
+    #[test]
+    fn filter_is_a_case_insensitive_substring() {
+        assert!(matches_filter("Order_Items", "item"));
+        assert!(!matches_filter("customers", "item"));
     }
 }

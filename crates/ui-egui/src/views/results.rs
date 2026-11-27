@@ -4,6 +4,7 @@ use egui_extras::{Column, TableBuilder};
 use application::export::ExportFormat;
 
 use crate::presenter::{Presenter, TabState};
+use crate::theme;
 
 const ROW_HEIGHT: f32 = 20.0;
 
@@ -38,15 +39,26 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
                 ));
                 return;
             }
-            let mut summary = format!(
-                "{} row(s) in {} ms",
-                result.rows.len(),
-                result.elapsed.as_millis()
-            );
-            if result.truncated {
-                summary.push_str(" (limited: more rows exist; Export saves more)");
-            }
-            ui.weak(summary);
+            let pal = *theme::palette(ui);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Results").strong());
+                ui.label(
+                    egui::RichText::new(result.rows.len().to_string())
+                        .background_color(pal.surface)
+                        .color(pal.text_muted),
+                );
+                ui.label(
+                    egui::RichText::new(format!("\u{2713} {} ms", result.elapsed.as_millis()))
+                        .color(pal.success),
+                );
+                if result.truncated {
+                    ui.label(
+                        egui::RichText::new("limited: more rows exist; Export saves more")
+                            .color(pal.warning),
+                    );
+                }
+            });
+            ui.add_space(4.0);
 
             // Only the visible rows are laid out, so large results stay responsive.
             TableBuilder::new(ui)
@@ -61,7 +73,12 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
                 .header(ROW_HEIGHT, |mut header| {
                     for col in &result.columns {
                         header.col(|ui| {
-                            ui.strong(&col.name).on_hover_text(&col.data_type.0);
+                            ui.label(
+                                egui::RichText::new(&col.name)
+                                    .color(theme::palette(ui).text_muted)
+                                    .strong(),
+                            )
+                            .on_hover_text(&col.data_type.0);
                         });
                     }
                 })
@@ -70,7 +87,11 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
                         for value in &result.rows[row.index()] {
                             row.col(|ui| {
                                 if value.is_null() {
-                                    ui.weak("NULL");
+                                    ui.label(
+                                        egui::RichText::new("NULL")
+                                            .italics()
+                                            .color(ui.visuals().weak_text_color()),
+                                    );
                                 } else {
                                     ui.add(egui::Label::new(value.display()).truncate());
                                 }

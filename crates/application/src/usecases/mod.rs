@@ -8,6 +8,7 @@ pub mod connections;
 pub mod data;
 pub mod export;
 pub mod inline;
+pub mod ui_prefs;
 
 pub use ai::{AiSettings, AiSettingsStore, ApiKeys, ListModels};
 pub use assistant::{AssistReply, AssistRequest, AssistTask, Assistant, PromptPreview};
@@ -21,3 +22,4 @@ pub use export::{DEFAULT_MAX_EXPORT_ROWS, ExportResult, ExportSummary};
 pub use inline::{
     InlineCompletion, InlineRequest, InlineSettings, InlineSettingsStore, SuggestInline,
 };
+pub use ui_prefs::{ThemePreference, UiPrefs, UiPrefsStore};

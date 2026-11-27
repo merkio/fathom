@@ -340,6 +340,21 @@ async fn handle(sh: Arc<Shared>, command: Command) {
                 ))));
             }
         }
+        Command::LoadUiPrefs => {
+            let result = uc
+                .ui_prefs
+                .load()
+                .await
+                .map_err(|e| text(UseCaseError::Storage(e)));
+            sh.emit(Event::UiPrefs(result));
+        }
+        Command::SaveUiPrefs(prefs) => {
+            if let Err(e) = uc.ui_prefs.save(&prefs).await {
+                sh.emit(Event::Notice(Err(format!(
+                    "Could not save the layout settings: {e}"
+                ))));
+            }
+        }
         Command::Export {
             tab,
             session,

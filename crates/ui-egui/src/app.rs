@@ -3,22 +3,26 @@
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
-use application::usecases::UseCases;
+use application::usecases::{ThemePreference, UseCases};
 use eframe::egui;
 
 use crate::backend::Backend;
 use crate::bridge::Event;
 use crate::presenter::Presenter;
+use crate::theme;
 use crate::views;
 
 pub struct FathomApp {
     presenter: Presenter,
     backend: Backend,
     events: Receiver<Event>,
+    /// The theme last installed into egui (re-applied only when the preference changes).
+    applied_theme: ThemePreference,
 }
 
 impl FathomApp {
     pub fn new(ctx: &egui::Context, use_cases: Arc<UseCases>) -> Self {
+        theme::apply(ctx, ThemePreference::System);
         let presenter = Presenter::new(use_cases.dialects(), use_cases.llm_providers());
         let repaint = ctx.clone();
         let (backend, events) = Backend::spawn(use_cases, move || repaint.request_repaint());
@@ -26,6 +30,7 @@ impl FathomApp {
             presenter,
             backend,
             events,
+            applied_theme: ThemePreference::System,
         }
     }
 
@@ -45,6 +50,10 @@ impl FathomApp {
 impl eframe::App for FathomApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.pump_events();
+        if self.presenter.prefs.theme != self.applied_theme {
+            self.applied_theme = self.presenter.prefs.theme;
+            theme::apply(ui.ctx(), self.applied_theme);
+        }
         views::show(ui, &mut self.presenter);
         self.flush_commands();
     }
