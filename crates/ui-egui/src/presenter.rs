@@ -19,6 +19,9 @@ use crate::bridge::{AiAsk, AiTask, Command, Event, SessionId, TabId};
 use crate::form::ConnectionForm;
 use crate::inline::{Ghost, InlineState, Snapshot};
 
+mod palette;
+pub use palette::{PaletteAction, PaletteItem, PaletteState};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Info(String),
@@ -113,6 +116,8 @@ pub struct Presenter {
     pub export: ExportUi,
     /// Theme and panel visibility (saved; loaded at start-up).
     pub prefs: UiPrefs,
+    /// The command palette, when open.
+    pub palette: Option<PaletteState>,
     /// Text in the explorer's "Find an object" box (filters tables by name).
     pub explorer_filter: String,
     /// Where the editor cursor was last drawn (tab, byte offset), for the status bar.
@@ -159,6 +164,7 @@ impl Presenter {
                 running: false,
             },
             prefs: UiPrefs::default(),
+            palette: None,
             explorer_filter: String::new(),
             last_cursor: None,
             dialects,
@@ -2481,5 +2487,149 @@ mod tests {
         });
         assert!(!p.export.running, "a failure frees the button");
         assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("already exists")));
+    }
+
+    // ---- command palette ---------------------------------------------------------------------
+
+    fn titles(p: &Presenter) -> Vec<String> {
+        p.palette_items().into_iter().map(|i| i.title).collect()
+    }
+
+    #[test]
+    fn the_palette_lists_nothing_until_opened_and_closes_cleanly() {
+        let mut p = presenter();
+        assert!(p.palette_items().is_empty());
+        p.open_palette();
+        assert!(titles(&p).contains(&"Enter focus mode".to_owned()));
+        p.close_palette();
+        assert!(p.palette.is_none() && p.palette_items().is_empty());
+    }
+
+    #[test]
+    fn the_query_filters_by_every_word_case_insensitively() {
+        let mut p = presenter();
+        p.open_palette();
+        p.set_palette_query("THEME dark".into());
+        assert_eq!(titles(&p), ["Theme: dark"]);
+        p.set_palette_query("nothing matches this".into());
+        assert!(p.palette_items().is_empty());
+    }
+
+    #[test]
+    fn switches_report_their_current_state() {
+        let mut p = presenter();
+        p.open_palette();
+        let toggle = |p: &Presenter, title: &str| {
+            p.palette_items()
+                .into_iter()
+                .find(|i| i.title == title)
+                .and_then(|i| i.toggle)
+        };
+        assert_eq!(toggle(&p, "Explorer"), Some(true));
+        assert_eq!(toggle(&p, "Inline AI"), Some(false), "off by default");
+        assert_eq!(toggle(&p, "Theme: follow the system"), Some(true));
+        assert_eq!(toggle(&p, "Theme: dark"), Some(false));
+    }
+
+    #[test]
+    fn running_a_toggle_flips_it_saves_it_and_closes_the_palette() {
+        let mut p = presenter();
+        p.open_palette();
+        p.run_palette(PaletteAction::ToggleExplorer);
+        assert!(!p.prefs.explorer && p.palette.is_none());
+        assert!(matches!(
+            p.take_commands().as_slice(),
+            [Command::SaveUiPrefs(prefs)] if !prefs.explorer
+        ));
+    }
+
+    #[test]
+    fn focus_mode_hides_the_explorer_and_side_panel_but_not_the_results() {
+        let mut p = presenter();
+        p.run_palette(PaletteAction::FocusMode);
+        assert!(!p.prefs.explorer && !p.prefs.side_panel && p.prefs.results);
+        assert_eq!(p.take_commands().len(), 1, "one save for the whole change");
+        // Already in focus mode: nothing to save.
+        p.run_palette(PaletteAction::FocusMode);
+        assert!(p.take_commands().is_empty());
+    }
+
+    #[test]
+    fn the_inline_ai_switch_goes_through_the_existing_setting() {
+        let mut p = presenter();
+        p.run_palette(PaletteAction::ToggleInlineAi);
+        assert!(p.inline.settings.enabled);
+        assert!(matches!(
+            p.take_commands().as_slice(),
+            [Command::SaveInlineSettings(s)] if s.enabled
+        ));
+    }
+
+    #[test]
+    fn tables_only_appear_for_a_query_and_open_an_unexecuted_select() {
+        let (mut p, session, _) = with_schema();
+        p.open_palette();
+        assert!(
+            !p.palette_items().iter().any(|i| i.section == "Tables"),
+            "an empty query lists commands only"
+        );
+        p.set_palette_query("custom".into());
+        let items = p.palette_items();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(
+            items[0].action,
+            PaletteAction::OpenTable {
+                session,
+                schema: "public".into(),
+                table: "customers".into()
+            }
+        );
+        let tabs_before = p.tabs.len();
+        p.take_commands();
+        p.palette_accept();
+        assert_eq!(p.tabs.len(), tabs_before + 1);
+        let text = p.selected_tab().map(|t| t.text.clone()).unwrap_or_default();
+        assert_eq!(text, "SELECT * FROM \"public\".\"customers\" LIMIT 100;");
+        assert!(
+            !p.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::Execute { .. })),
+            "opening a table must not run anything"
+        );
+    }
+
+    #[test]
+    fn the_highlight_wraps_and_resets_when_the_query_changes() {
+        let mut p = presenter();
+        p.open_palette();
+        let n = p.palette_items().len();
+        p.palette_move(-1);
+        assert_eq!(p.palette.as_ref().map(|s| s.selected), Some(n - 1));
+        p.palette_move(1);
+        assert_eq!(p.palette.as_ref().map(|s| s.selected), Some(0));
+        p.palette_move(2);
+        p.set_palette_query("theme".into());
+        assert_eq!(p.palette.as_ref().map(|s| s.selected), Some(0));
+    }
+
+    #[test]
+    fn accepting_runs_the_highlighted_item() {
+        let mut p = presenter();
+        p.open_palette();
+        p.set_palette_query("theme dark".into());
+        p.palette_accept();
+        assert_eq!(p.prefs.theme, ThemePreference::Dark);
+        assert!(p.palette.is_none());
+    }
+
+    #[test]
+    fn new_query_needs_an_open_connection() {
+        let mut p = presenter();
+        p.run_palette(PaletteAction::NewQuery);
+        assert!(p.tabs.is_empty());
+        let (mut p, _, _, _) = connected();
+        let before = p.tabs.len();
+        p.run_palette(PaletteAction::NewQuery);
+        assert_eq!(p.tabs.len(), before + 1);
     }
 }

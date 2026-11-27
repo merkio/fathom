@@ -6,16 +6,20 @@ mod code_editor;
 mod connections;
 mod editor;
 mod history;
+mod palette;
 mod results;
 mod schema;
 
 use application::usecases::ThemePreference;
-use eframe::egui::{self, Frame, Margin, Panel, RichText, Stroke};
+use eframe::egui::{
+    self, Frame, Key, KeyboardShortcut, Margin, Modifiers, Panel, RichText, Stroke,
+};
 
 use crate::presenter::{Presenter, RightPanel, Status};
 use crate::theme;
 
 pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
+    shortcuts(ui, p);
     let pal = *theme::palette(ui);
     let chrome = Frame::NONE
         .fill(pal.chrome)
@@ -64,6 +68,41 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
         .frame(Frame::NONE.fill(pal.bg))
         .show(ui, |ui| editor::show(ui, p));
     connections::show_form(ui.ctx(), p);
+    palette::show(ui.ctx(), p);
+}
+
+/// Window-wide shortcuts. The palette owns the keyboard while it is open.
+fn shortcuts(ui: &egui::Ui, p: &mut Presenter) {
+    let cmd = Modifiers::COMMAND;
+    let (mut open, mut focus, mut explorer, mut results, mut side) =
+        (false, false, false, false, false);
+    ui.input_mut(|i| {
+        // The shifted shortcut first: `Cmd+F` must not swallow `Cmd+Shift+F`.
+        focus = i.consume_shortcut(&KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::F));
+        open = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::K));
+        explorer = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Num1));
+        results = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Num2));
+        side = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::H));
+    });
+    if open {
+        if p.palette.is_some() {
+            p.close_palette();
+        } else {
+            p.open_palette();
+        }
+    }
+    if focus {
+        p.focus_mode();
+    }
+    if explorer {
+        p.toggle_explorer();
+    }
+    if results {
+        p.toggle_results();
+    }
+    if side {
+        p.toggle_side_panel();
+    }
 }
 
 /// App name, the open query's breadcrumb, the theme switch and the layout toggles.
@@ -96,6 +135,17 @@ fn header(ui: &mut egui::Ui, p: &mut Presenter) {
                 .clicked()
             {
                 p.set_theme(next);
+            }
+            if ui
+                .button(format!(
+                    "Search  {}",
+                    ui.ctx()
+                        .format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::K))
+                ))
+                .on_hover_text("Open the command palette")
+                .clicked()
+            {
+                p.open_palette();
             }
             ui.menu_button("Layout", |ui| {
                 let (mut explorer, mut results, mut side) =
