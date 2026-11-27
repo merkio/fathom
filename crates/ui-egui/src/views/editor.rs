@@ -24,7 +24,22 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
         if let Some(tab) = p.selected_tab()
             && let Some(open) = p.open.iter().find(|o| o.session == tab.session)
         {
-            ui.label(RichText::new(&open.name).strong());
+            let database = p
+                .connections
+                .iter()
+                .find(|c| c.id == open.connection)
+                .map(super::database_label)
+                .filter(|d| !d.is_empty());
+            match database {
+                Some(db) => {
+                    ui.label(RichText::new(&open.name).strong());
+                    ui.label(RichText::new("/").color(pal.text_faint));
+                    ui.label(RichText::new(db).color(pal.text_muted));
+                }
+                None => {
+                    ui.label(RichText::new(&open.name).strong());
+                }
+            }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(8.0);
@@ -51,14 +66,26 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
     if p.prefs.results {
         Panel::bottom("results_panel")
             .resizable(true)
-            .default_size(300.0)
+            .default_size((ui.available_height() * 0.55).max(260.0))
             .min_size(120.0)
             .show(ui, |ui| {
-                super::results::export_controls(ui, p);
-                super::results::edit_bar(ui, p);
+                if p.selected_tab().is_some_and(|t| t.grid.has_pending()) {
+                    Panel::bottom("pending_bar_panel")
+                        .frame(egui::Frame::NONE)
+                        .show(ui, |ui| super::results::pending_bar(ui, p));
+                }
+                Panel::bottom("results_footer_panel")
+                    .frame(egui::Frame::NONE)
+                    .show_separator_line(false)
+                    .show(ui, |ui| super::results::footer(ui, p));
                 super::results::show(ui, p);
             });
     }
+
+    Panel::bottom("ai_card_panel")
+        .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(16, 8)))
+        .show_separator_line(false)
+        .show(ui, |ui| super::ai_card::show(ui, p));
 
     let height = ui.available_height();
     egui::ScrollArea::vertical()
@@ -95,6 +122,11 @@ fn tab_bar(ui: &mut egui::Ui, p: &mut Presenter) {
             if p.is_dirty(tab.id) {
                 title = format!("\u{25CF} {title}");
             }
+            ui.label(RichText::new("</>").monospace().color(if selected {
+                pal.accent
+            } else {
+                pal.text_faint
+            }));
             let text = RichText::new(title).color(if selected { pal.text } else { pal.text_muted });
             let response = ui.add(egui::Button::new(text).frame(false));
             if response.clicked() {

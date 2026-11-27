@@ -95,6 +95,31 @@ fn kind_tag(kind: SuggestionKind) -> &'static str {
     }
 }
 
+/// Width reserved left of the text for line numbers.
+const GUTTER_WIDTH: f32 = 48.0;
+
+/// Line numbers in the left margin, one per logical line (a wrapped line is numbered once).
+fn draw_line_numbers(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput) {
+    let color = ui.visuals().weak_text_color();
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let x = output.galley_pos.x - 14.0;
+    let mut number = 1;
+    let mut starts_line = true;
+    for placed in &output.galley.rows {
+        if starts_line {
+            ui.painter().text(
+                egui::pos2(x, output.galley_pos.y + placed.pos.y),
+                egui::Align2::RIGHT_TOP,
+                number.to_string(),
+                font.clone(),
+                color,
+            );
+            number += 1;
+        }
+        starts_line = placed.ends_with_newline;
+    }
+}
+
 /// Cursor of the editor as of the last frame, as a byte offset.
 fn cursor_byte(ctx: &egui::Context, id: Id, text: &str) -> Option<usize> {
     let state = TextEditState::load(ctx, id)?;
@@ -172,10 +197,17 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter, tab: TabId, height: f32) {
         .id(edit_id)
         .code_editor()
         .hint_text("SELECT ...")
+        .frame(egui::Frame::NONE.inner_margin(egui::Margin {
+            left: GUTTER_WIDTH as i8,
+            right: 12,
+            top: 8,
+            bottom: 8,
+        }))
         .desired_width(f32::INFINITY)
         .desired_rows(rows)
         .layouter(&mut layouter)
         .show(ui);
+    draw_line_numbers(ui, &output);
 
     // 3. Inline ghost text and the popup, from the state after this frame's edits.
     let now = Instant::now();

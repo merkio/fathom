@@ -356,10 +356,16 @@ impl Presenter {
             dialect.quote_identifier(schema),
             dialect.quote_identifier(table)
         );
-        if let Some(id) = self.new_tab(session)
-            && let Some(tab) = self.tab_mut(id)
-        {
-            tab.text = format!("SELECT * FROM {quoted} LIMIT 100;");
+        self.explorer_selected = Some((session, schema.to_owned(), table.to_owned()));
+        let text = format!("SELECT * FROM {quoted} LIMIT 100;");
+        // An empty editor of the same instance is filled in; otherwise a new tab is opened.
+        let reuse = self
+            .selected_tab()
+            .filter(|t| t.session == session && t.text.trim().is_empty() && t.saved.is_none())
+            .map(|t| t.id);
+        let id = reuse.or_else(|| self.new_tab(session));
+        if let Some(tab) = id.and_then(|id| self.tab_mut(id)) {
+            tab.text = text;
         }
     }
 }

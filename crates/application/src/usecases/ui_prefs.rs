@@ -40,7 +40,8 @@ impl ThemePreference {
     }
 }
 
-/// The saved layout and appearance. `Default` shows the explorer and the results panel.
+/// The saved layout and appearance. `Default` shows the explorer and the results panel; the
+/// History/AI side panel is opt-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiPrefs {
     pub theme: ThemePreference,
@@ -55,7 +56,7 @@ impl Default for UiPrefs {
             theme: ThemePreference::System,
             explorer: true,
             results: true,
-            side_panel: true,
+            side_panel: false,
         }
     }
 }
@@ -139,7 +140,7 @@ mod tests {
             theme: ThemePreference::Dark,
             explorer: false,
             results: false,
-            side_panel: false,
+            side_panel: true,
         };
         block_on(store.save(&prefs)).unwrap();
         assert_eq!(block_on(store.load()).unwrap(), prefs);
