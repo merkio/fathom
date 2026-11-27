@@ -8,7 +8,9 @@ use std::time::Duration;
 use application::ports::{DatabaseDriver, DbError, DbSession, IntrospectScope};
 use db_sqlite::SqliteDriver;
 use domain::{ConnectionProfile, DriverKind, QueryLanguage, QueryRequest, TableKind, Value};
-use test_support::driver_contract::{DriverFixture, Sleeper, run_database_driver_contract};
+use test_support::driver_contract::{
+    Capabilities, DriverFixture, Sleeper, run_database_driver_contract,
+};
 
 fn profile(path: &std::path::Path, options: &[(&str, &str)]) -> ConnectionProfile {
     let mut p = ConnectionProfile::new("sqlite", DriverKind::new("sqlite"), "local file");
@@ -57,6 +59,7 @@ async fn sqlite_passes_the_driver_contract() {
             "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000000) \
                           SELECT count(*) FROM c"
                 .into(),
+        capabilities: Capabilities::default(),
     };
     let sleep: Sleeper = Arc::new(|d: Duration| Box::pin(tokio::time::sleep(d)));
     run_database_driver_contract(&SqliteDriver::new(), &fixture, sleep).await;

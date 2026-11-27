@@ -6,6 +6,7 @@ members = [
     "crates/db-postgres",
     "crates/db-sqlite",
     "crates/db-mysql",
+    "crates/db-clickhouse",
     "crates/llm-anthropic",
     "crates/llm-openai",
     "crates/llm-ollama",

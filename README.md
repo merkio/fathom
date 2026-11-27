@@ -9,7 +9,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/merkio/fathom)](https://github.com/merkio/fathom/commits/main)
 
 A desktop database client written in Rust ([egui](https://github.com/emilk/egui)), with
-optional LLM assistance. It connects to PostgreSQL, MySQL/MariaDB and SQLite. New databases and LLM providers plug in as separate crates.
+optional LLM assistance. It connects to PostgreSQL, MySQL/MariaDB, ClickHouse and SQLite. New databases and LLM providers plug in as separate crates.
 
 > **Status:** under development. See `PROGRESS.md` for which milestones are done and what has
 > been verified (and against what).
@@ -76,10 +76,13 @@ Set in the connection dialog's **Advanced** box, one `key=value` per line.
 | PostgreSQL | `sslrootcert` | CA certificate file used to verify the server (needed for private CAs) |
 | PostgreSQL | `sslcert`, `sslkey` | Client certificate and key (mutual TLS) |
 | MySQL / MariaDB | `sslmode`, `sslrootcert`, `sslcert`, `sslkey` | Same meaning as for PostgreSQL (`verify-full` verifies the host name). Default `prefer` uses TLS when the server offers it. MySQL 8+ accounts using `caching_sha2_password` need TLS: with `sslmode=disable` the connection fails with an RSA error |
+| ClickHouse | `secure=true` or `sslmode=require`/`verify-ca`/`verify-full` | Use HTTPS (port 8443 unless set). The certificate is always verified against the system's root store. Default: plain HTTP on port 8123 |
 | SQLite | `mode=ro` | Open the file read-only |
 | SQLite | `create=true` | Create the file if it does not exist (off: a typo is an error) |
 
 For SQLite, put the file path in the **Database** field (Host and User are ignored).
+
+ClickHouse is reached over its HTTP interface (port 8123). The user is `default` unless you set one. ClickHouse has no foreign keys, and `UPDATE`/`DELETE` run as background mutations that report no row count.
 
 The **Read-only** checkbox blocks everything except plain reads before it reaches the database.
 It is a syntactic check; for a hard guarantee also use a database user with read-only rights.
@@ -101,6 +104,10 @@ cargo test -p db-postgres --features containers
 
 MySQL/MariaDB: set `FATHOM_TEST_MYSQL_HOST` (and `_PORT`, `_USER`, `_PASSWORD`, `_DB`) and run
 `cargo test -p db-mysql --features integration`.
+
+ClickHouse: set `FATHOM_TEST_CLICKHOUSE_HOST` (and `_PORT`, `_USER`, `_PASSWORD`, `_DB`) and run
+`cargo test -p db-clickhouse --features integration`. Use a recent server: indexes and the
+rows-written header need ClickHouse 19+, and CI runs `latest` and the 25.8 LTS.
 
 TLS tests additionally need `FATHOM_TEST_PG_TLS_CA` and `FATHOM_TEST_PG_TLS_OTHER_CA` (paths to a
 CA that signed the server certificate, and to an unrelated CA); without them they skip.

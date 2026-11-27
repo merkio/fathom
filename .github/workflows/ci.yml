@@ -78,7 +78,18 @@ jobs:
         options: >-
           --health-cmd "healthcheck.sh --connect --innodb_initialized"
           --health-interval 5s --health-timeout 5s --health-retries 20
+      clickhouse:
+        image: clickhouse/clickhouse-server:latest
+        env:
+          CLICKHOUSE_PASSWORD: test
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports: ["8123:8123"]
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     env:
+      FATHOM_TEST_CLICKHOUSE_HOST: 127.0.0.1
+      FATHOM_TEST_CLICKHOUSE_PASSWORD: test
       FATHOM_TEST_PG_HOST: 127.0.0.1
       FATHOM_TEST_PG_PASSWORD: postgres
       FATHOM_TEST_MYSQL_HOST: 127.0.0.1
@@ -99,7 +110,7 @@ jobs:
       - name: Collect coverage
         run: >-
           cargo llvm-cov --workspace --locked
-          --features db-postgres/integration,db-mysql/integration
+          --features db-postgres/integration,db-mysql/integration,db-clickhouse/integration
           --ignore-filename-regex '(crates/ui-egui/src/views/|crates/app/src/main\.rs|/tests/)'
           --lcov --output-path lcov.info
       - name: Summary
@@ -170,6 +181,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p db-mysql --features integration --locked
+
+  clickhouse-integration:
+    name: Integration (clickhouse:${{ matrix.tag }})
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [latest, "25.8"]  # 25.8 is an LTS release
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: clickhouse/clickhouse-server:${{ matrix.tag }}
+        env:
+          CLICKHOUSE_PASSWORD: test
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports: ["8123:8123"]
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      FATHOM_TEST_CLICKHOUSE_HOST: 127.0.0.1
+      FATHOM_TEST_CLICKHOUSE_PASSWORD: test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p db-clickhouse --features integration --locked
 
   audit:
     name: Dependencies (cargo-deny)

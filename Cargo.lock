@@ -218,6 +218,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "application",
+ "db-clickhouse",
  "db-mysql",
  "db-postgres",
  "db-sqlite",
@@ -722,6 +723,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bnum"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "119771309b95163ec7aaf79810da82f7cd0599c19722d48b9c03894dca833966"
+
+[[package]]
 name = "bollard"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -805,6 +812,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a680398c10c7bc0488067c4612226ea905a85f607134b69f3068d505d58c4214"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -847,6 +863,9 @@ name = "bytes"
 version = "1.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "calloop"
@@ -971,6 +990,57 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common 0.1.6",
  "inout",
+]
+
+[[package]]
+name = "clickhouse"
+version = "0.15.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6ad2112cf4ad543ceed12e48b779e82e8f3a8172374cac98d59e59feda35c69"
+dependencies = [
+ "bnum",
+ "bstr",
+ "bytes",
+ "clickhouse-macros",
+ "clickhouse-types",
+ "futures-channel",
+ "futures-util",
+ "half",
+ "hashbrown 0.17.2",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "rand 0.9.5",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "clickhouse-macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff6669899e23cb87b43daf7996f0ea3b9c07d0fb933d745bb7b815b052515ae3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "clickhouse-types"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7ddab58fabf3bdde7b6fa401f72b9abc7566ff015264c89aaaa71cf1d173d06"
+dependencies = [
+ "bytes",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1226,6 +1296,20 @@ dependencies = [
  "darling_core",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "db-clickhouse"
+version = "0.1.0"
+dependencies = [
+ "application",
+ "async-trait",
+ "clickhouse",
+ "domain",
+ "secrecy",
+ "serde_json",
+ "test-support",
+ "tokio",
 ]
 
 [[package]]
@@ -2353,6 +2437,8 @@ version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.2.0",
 ]
 
@@ -2537,6 +2623,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -5104,6 +5191,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
