@@ -92,3 +92,44 @@ profile = "analytics-prod"         # optional: a profile from ~/.aws/config
 # name = "Build archive"
 # kind = "nfs"
 # path = "/mnt/nfs"
+
+# ---------------------------------------------------------------------------------------------
+# Keyboard shortcuts
+# ---------------------------------------------------------------------------------------------
+# Every action can get your own key combination. Each line replaces the default of one action;
+# actions you do not list keep theirs. Give one combination, a list of them, or "none" (or [])
+# to remove the shortcut. The command palette entry "Keyboard shortcuts" shows what is in force
+# and flags mistakes. Restart Fathom after editing.
+#
+# Combinations look like "Ctrl+Shift+E", "Alt+Enter" or "F5".
+#   Ctrl   the command key of your system: Control on Windows/Linux, Command on macOS
+#          ("Cmd", "Command" and "Mod" mean the same)
+#   Alt    Alt, or Option on macOS      Shift   Shift
+# Keys are letters, digits, F1-F12, Enter, Space, Tab, Escape, Delete, Backspace, arrows
+# (Up, Down, Left, Right), Home, End, PageUp, PageDown, and punctuation by name (Comma, Period,
+# Slash, Backtick, ...). Shortcuts need Ctrl, Alt or Cmd so they never get in the way of typing;
+# F-keys may stand alone. Copy and paste keys belong to your system and cannot be changed here.
+#
+# Action names and defaults:
+#   run_query          Ctrl+Enter         run the query in the editor
+#   review_changes     Ctrl+Shift+Enter   review and apply the edited rows
+#   save_query         Ctrl+S             save the query under a name
+#   command_palette    Ctrl+K             search commands, tables and queries
+#   export_data        Ctrl+Shift+E       export the results
+#   focus_mode         Ctrl+Shift+F       hide the explorer and the side panel
+#   toggle_explorer    Ctrl+1             show or hide the explorer
+#   toggle_results     Ctrl+2             show or hide the results panel
+#   toggle_side_panel  Ctrl+H             show or hide the history and AI panel
+#   reset_layout       Ctrl+Shift+L       back to the default layout
+#   ask_ai             Ctrl+I             jump to the AI prompt
+#   autocomplete       Ctrl+Space         show completions in the editor
+#   stage_deletion     Delete, Backspace  mark the ticked rows for deletion (bare keys allowed)
+#
+# Examples (remove the leading "# " to use them):
+[keys]
+# run_query = "F5"                       # F5 instead of Ctrl+Enter
+# save_query = ["Ctrl+S", "F2"]          # two shortcuts for one action
+# command_palette = "Ctrl+P"
+# export_data = "none"                   # no shortcut at all
+# ask_ai = "Alt+A"
+# stage_deletion = "Delete"              # only Delete, not Backspace

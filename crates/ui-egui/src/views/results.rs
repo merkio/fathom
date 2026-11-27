@@ -1,6 +1,7 @@
 use eframe::egui::{self, Frame, Margin, RichText, Sense, Stroke};
 use egui_extras::{Column, TableBuilder};
 
+use crate::keymap::Action;
 use crate::presenter::{NULL_TEXT, Presenter, ReviewKind, TabState};
 use crate::theme;
 
@@ -285,10 +286,11 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
     }
     // Keys that act on the grid, unless a text box has the keyboard.
     if done && !ui.ctx().egui_wants_keyboard_input() {
+        let keymap = p.keymap.clone();
         let (copy, delete) = ui.input(|i| {
             (
                 i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
-                i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                keymap.pressed(i, Action::StageDeletion),
             )
         });
         if copy {
@@ -371,9 +373,12 @@ pub fn footer(ui: &mut egui::Ui, p: &mut Presenter) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let hint = if editable {
-                "Double-click to edit \u{00B7} Ctrl+C copy \u{00B7} Del stage deletion"
+                format!(
+                    "Double-click to edit \u{00B7} Ctrl+C copy \u{00B7} {} stage deletion",
+                    p.keymap.hint(Action::StageDeletion).unwrap_or_default()
+                )
             } else {
-                "Ctrl+C copy"
+                "Ctrl+C copy".to_owned()
             };
             ui.label(RichText::new(hint).size(11.0).color(pal.text_muted));
         });
@@ -411,10 +416,7 @@ pub fn pending_bar(ui: &mut egui::Ui, p: &mut Presenter) {
             .color(pal.text_muted),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::Enter,
-            ));
+            let shortcut = p.keymap.hint(Action::ReviewChanges).unwrap_or_default();
             review = ui
                 .add(theme::primary_button(format!(
                     "Review & apply   {shortcut}"
