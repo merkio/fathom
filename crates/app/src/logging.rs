@@ -79,12 +79,12 @@ impl Write for SharedFile {
     }
 }
 
-/// Starts logging to `<dir>/dbiever.log` (level from `DBIEVER_LOG`, default `info`). Failure to
+/// Starts logging to `<dir>/fathom.log` (level from `FATHOM_LOG`, default `info`). Failure to
 /// log is never fatal: the app runs without a log instead.
 pub fn init(dir: &Path) {
-    let path = dir.join("dbiever.log");
+    let path = dir.join("fathom.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
-        let _ = std::fs::rename(&path, dir.join("dbiever.log.1"));
+        let _ = std::fs::rename(&path, dir.join("fathom.log.1"));
     }
     let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) else {
         eprintln!(
@@ -94,7 +94,7 @@ pub fn init(dir: &Path) {
         return;
     };
     let shared = SharedFile(Arc::new(Mutex::new(file)));
-    let filter = tracing_subscriber::EnvFilter::try_from_env("DBIEVER_LOG")
+    let filter = tracing_subscriber::EnvFilter::try_from_env("FATHOM_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -203,19 +203,19 @@ mod tests {
 
     #[test]
     fn init_writes_a_log_file_and_rotates_a_big_one() {
-        let dir = std::env::temp_dir().join(format!("dbiever-log-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fathom-log-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(
-            dir.join("dbiever.log"),
+            dir.join("fathom.log"),
             vec![b'x'; (MAX_LOG_BYTES + 1) as usize],
         )
         .expect("big log");
         init(&dir);
         assert!(
-            dir.join("dbiever.log.1").exists(),
+            dir.join("fathom.log.1").exists(),
             "the oversized log was rotated"
         );
-        assert!(dir.join("dbiever.log").exists());
+        assert!(dir.join("fathom.log").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

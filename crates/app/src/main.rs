@@ -16,12 +16,12 @@ use domain::SecretRef;
 use secrecy::SecretString;
 use storage::{KeyringSecretStore, MemorySecretStore, SqliteStore};
 
-const KEYRING_SERVICE: &str = "dbiever";
+const KEYRING_SERVICE: &str = "fathom";
 
 fn data_dir() -> anyhow::Result<PathBuf> {
-    let dir = match std::env::var_os("DBIEVER_DATA_DIR") {
+    let dir = match std::env::var_os("FATHOM_DATA_DIR") {
         Some(dir) => PathBuf::from(dir),
-        None => directories::ProjectDirs::from("", "", "dbiever")
+        None => directories::ProjectDirs::from("", "", "fathom")
             .context("could not determine the application data directory")?
             .data_dir()
             .to_path_buf(),
@@ -33,7 +33,7 @@ fn data_dir() -> anyhow::Result<PathBuf> {
 /// OS keychain when available. Headless machines have none, so passwords then live in memory
 /// only (they are never written to disk) and must be re-entered after a restart.
 fn secret_store() -> Arc<dyn SecretStore> {
-    if std::env::var("DBIEVER_SECRET_STORE").as_deref() == Ok("memory") {
+    if std::env::var("FATHOM_SECRET_STORE").as_deref() == Ok("memory") {
         return Arc::new(MemorySecretStore::new());
     }
     let keyring = KeyringSecretStore::new(KEYRING_SERVICE);
@@ -55,12 +55,12 @@ fn secret_store() -> Arc<dyn SecretStore> {
 /// references; the settings screen saves them there. Ollama needs none and defaults to the local
 /// machine, so nothing leaves it unless the user picks a cloud provider.
 ///
-/// `DBIEVER_OLLAMA_URL` and `DBIEVER_OPENAI_BASE_URL` point the adapters at other servers (for
+/// `FATHOM_OLLAMA_URL` and `FATHOM_OPENAI_BASE_URL` point the adapters at other servers (for
 /// example a remote Ollama or an OpenAI-compatible endpoint).
 fn llm_providers(secrets: Arc<dyn SecretStore>) -> anyhow::Result<LlmRegistry> {
     let mut registry = LlmRegistry::new();
 
-    let ollama = match std::env::var("DBIEVER_OLLAMA_URL") {
+    let ollama = match std::env::var("FATHOM_OLLAMA_URL") {
         Ok(url) => llm_ollama::OllamaConfig::with_base_url(url),
         Err(_) => llm_ollama::OllamaConfig::default(),
     };
@@ -78,7 +78,7 @@ fn llm_providers(secrets: Arc<dyn SecretStore>) -> anyhow::Result<LlmRegistry> {
 
     let openai_key = SecretRef::new("llm/openai");
     let mut openai = llm_openai::OpenAiConfig::new(openai_key.clone());
-    if let Ok(url) = std::env::var("DBIEVER_OPENAI_BASE_URL") {
+    if let Ok(url) = std::env::var("FATHOM_OPENAI_BASE_URL") {
         openai = openai.with_base_url(url);
     }
     registry.register_with_key(
@@ -104,7 +104,7 @@ fn main() -> anyhow::Result<()> {
     let data = data_dir()?;
     logging::init(&data);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
-    let store = Arc::new(SqliteStore::open(data.join("dbiever.sqlite"))?);
+    let store = Arc::new(SqliteStore::open(data.join("fathom.sqlite"))?);
 
     let mut drivers = DriverRegistry::new();
     drivers.register(Arc::new(db_postgres::PostgresDriver::new()));

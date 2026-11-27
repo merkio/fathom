@@ -1,7 +1,7 @@
 //! Runs the shared `DatabaseDriver` contract against a real PostgreSQL.
 //!
 //! Enable with `--features integration` and point at a server through environment variables:
-//! `DBIEVER_TEST_PG_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_DB` (host and password required).
+//! `FATHOM_TEST_PG_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_DB` (host and password required).
 //! With `--features containers` a server is started through Docker instead.
 #![cfg(feature = "integration")]
 

@@ -130,7 +130,7 @@ pub fn describe(error: &UseCaseError) -> UserError {
         UseCaseError::Secret(SecretError::Unavailable(m)) => UserError::new(
             format!("The secret store is unavailable: {m}"),
             Some(
-                "Passwords need the OS keychain. Set DBIEVER_SECRET_STORE=memory to keep them in memory only (they are not saved).",
+                "Passwords need the OS keychain. Set FATHOM_SECRET_STORE=memory to keep them in memory only (they are not saved).",
             ),
         ),
         UseCaseError::Llm(LlmError::Authentication) => UserError::new(
@@ -256,7 +256,7 @@ mod tests {
             text(UseCaseError::Secret(SecretError::Unavailable(
                 "no dbus".into()
             )))
-            .contains("DBIEVER_SECRET_STORE")
+            .contains("FATHOM_SECRET_STORE")
         );
         assert!(text(UseCaseError::Io("permission denied".into())).contains("may write"));
     }

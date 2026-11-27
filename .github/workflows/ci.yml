@@ -79,12 +79,12 @@ jobs:
           --health-cmd "healthcheck.sh --connect --innodb_initialized"
           --health-interval 5s --health-timeout 5s --health-retries 20
     env:
-      DBIEVER_TEST_PG_HOST: 127.0.0.1
-      DBIEVER_TEST_PG_PASSWORD: postgres
-      DBIEVER_TEST_MYSQL_HOST: 127.0.0.1
-      DBIEVER_TEST_MYSQL_USER: root
-      DBIEVER_TEST_MYSQL_PASSWORD: test
-      DBIEVER_TEST_MYSQL_DB: test
+      FATHOM_TEST_PG_HOST: 127.0.0.1
+      FATHOM_TEST_PG_PASSWORD: postgres
+      FATHOM_TEST_MYSQL_HOST: 127.0.0.1
+      FATHOM_TEST_MYSQL_USER: root
+      FATHOM_TEST_MYSQL_PASSWORD: test
+      FATHOM_TEST_MYSQL_DB: test
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -133,8 +133,8 @@ jobs:
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      DBIEVER_TEST_PG_HOST: 127.0.0.1
-      DBIEVER_TEST_PG_PASSWORD: postgres
+      FATHOM_TEST_PG_HOST: 127.0.0.1
+      FATHOM_TEST_PG_PASSWORD: postgres
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -161,10 +161,10 @@ jobs:
           --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -ptest || mariadb-admin ping -h 127.0.0.1 -uroot -ptest"
           --health-interval 5s --health-timeout 5s --health-retries 20
     env:
-      DBIEVER_TEST_MYSQL_HOST: 127.0.0.1
-      DBIEVER_TEST_MYSQL_USER: root
-      DBIEVER_TEST_MYSQL_PASSWORD: test
-      DBIEVER_TEST_MYSQL_DB: test
+      FATHOM_TEST_MYSQL_HOST: 127.0.0.1
+      FATHOM_TEST_MYSQL_USER: root
+      FATHOM_TEST_MYSQL_PASSWORD: test
+      FATHOM_TEST_MYSQL_DB: test
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

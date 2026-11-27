@@ -1,4 +1,4 @@
-# DBiever
+# Fathom
 
 [![CI](https://github.com/merkio/fathom/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/merkio/fathom/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/merkio/fathom/graph/badge.svg)](https://codecov.io/gh/merkio/fathom)
@@ -58,11 +58,11 @@ Environment variables:
 
 | Variable | Meaning |
 |---|---|
-| `DBIEVER_DATA_DIR` | Where the SQLite settings/history file and the log live (default: the platform data directory) |
-| `DBIEVER_SECRET_STORE=memory` | Do not use the OS keychain; keep passwords in memory only |
-| `DBIEVER_LOG` | Log level or filter (default `info`), e.g. `debug` |
-| `DBIEVER_OLLAMA_URL` | Ollama address (default `http://localhost:11434`) |
-| `DBIEVER_OPENAI_BASE_URL` | Point the OpenAI provider at a compatible server (vLLM, LM Studio, ...) |
+| `FATHOM_DATA_DIR` | Where the SQLite settings/history file and the log live (default: the platform data directory) |
+| `FATHOM_SECRET_STORE=memory` | Do not use the OS keychain; keep passwords in memory only |
+| `FATHOM_LOG` | Log level or filter (default `info`), e.g. `debug` |
+| `FATHOM_OLLAMA_URL` | Ollama address (default `http://localhost:11434`) |
+| `FATHOM_OPENAI_BASE_URL` | Point the OpenAI provider at a compatible server (vLLM, LM Studio, ...) |
 
 Exports are written to your Documents folder (relative file names) and never overwrite existing files.
 
@@ -93,16 +93,16 @@ cargo test --workspace          # fast; no database or network needed
 Integration tests against a real PostgreSQL are behind a feature flag:
 
 ```sh
-DBIEVER_TEST_PG_HOST=127.0.0.1 DBIEVER_TEST_PG_PASSWORD=... \
+FATHOM_TEST_PG_HOST=127.0.0.1 FATHOM_TEST_PG_PASSWORD=... \
   cargo test -p db-postgres --features integration
 # or let testcontainers start one (needs Docker):
 cargo test -p db-postgres --features containers
 ```
 
-MySQL/MariaDB: set `DBIEVER_TEST_MYSQL_HOST` (and `_PORT`, `_USER`, `_PASSWORD`, `_DB`) and run
+MySQL/MariaDB: set `FATHOM_TEST_MYSQL_HOST` (and `_PORT`, `_USER`, `_PASSWORD`, `_DB`) and run
 `cargo test -p db-mysql --features integration`.
 
-TLS tests additionally need `DBIEVER_TEST_PG_TLS_CA` and `DBIEVER_TEST_PG_TLS_OTHER_CA` (paths to a
+TLS tests additionally need `FATHOM_TEST_PG_TLS_CA` and `FATHOM_TEST_PG_TLS_OTHER_CA` (paths to a
 CA that signed the server certificate, and to an unrelated CA); without them they skip.
 
 ## Architecture

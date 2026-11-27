@@ -111,7 +111,7 @@ struct ModelEntry {
 impl OpenAiProvider {
     pub fn new(config: OpenAiConfig, secrets: Arc<dyn SecretStore>) -> Result<Self, LlmError> {
         let http = reqwest::Client::builder()
-            .user_agent("dbiever")
+            .user_agent("fathom")
             .connect_timeout(Duration::from_secs(10))
             // Time allowed between chunks of a streamed reply, not for the whole reply.
             .read_timeout(Duration::from_secs(120))

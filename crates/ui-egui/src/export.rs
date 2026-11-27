@@ -12,7 +12,7 @@ pub fn resolve_path(directory: &Path, name: &str, format: ExportFormat) -> Resul
         return Err("The file name contains an invalid character.".into());
     }
     let name = if name.is_empty() {
-        "dbiever-export"
+        "fathom-export"
     } else {
         name
     };
@@ -64,11 +64,11 @@ mod tests {
     fn empty_means_a_default_name() {
         assert_eq!(
             resolve("", ExportFormat::Csv),
-            Ok(PathBuf::from("/home/u/exports/dbiever-export.csv"))
+            Ok(PathBuf::from("/home/u/exports/fathom-export.csv"))
         );
         assert_eq!(
             resolve("   ", ExportFormat::Json),
-            Ok(PathBuf::from("/home/u/exports/dbiever-export.json"))
+            Ok(PathBuf::from("/home/u/exports/fathom-export.json"))
         );
     }
 

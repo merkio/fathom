@@ -48,7 +48,7 @@ fn connection_crud_round_trips_every_field() {
 #[test]
 fn data_survives_reopening_the_file() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("dbiever.sqlite");
+    let path = dir.path().join("fathom.sqlite");
     let p = profile("persisted");
     {
         let store = SqliteStore::open(&path).expect("open");
@@ -127,7 +127,7 @@ fn memory_secret_store_round_trip() {
 fn no_password_is_written_to_the_sqlite_file() {
     const PASSWORD: &str = "correct-horse-battery-staple-7f3a";
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("dbiever.sqlite");
+    let path = dir.path().join("fathom.sqlite");
     let store = Arc::new(SqliteStore::open(&path).expect("open"));
     let secrets = Arc::new(MemorySecretStore::new());
 
@@ -158,7 +158,7 @@ fn no_password_is_written_to_the_sqlite_file() {
 #[test]
 #[ignore = "requires an OS keychain"]
 fn keyring_store_round_trip() {
-    let store = storage::KeyringSecretStore::new("dbiever-test");
+    let store = storage::KeyringSecretStore::new("fathom-test");
     let key = SecretRef::new("round-trip");
     block_on(store.set(&key, SecretString::from("pw"))).expect("set");
     let got = block_on(store.get(&key)).expect("get").expect("present");

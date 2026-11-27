@@ -70,7 +70,7 @@ struct TagEntry {
 impl OllamaProvider {
     pub fn new(config: OllamaConfig) -> Result<Self, LlmError> {
         let http = reqwest::Client::builder()
-            .user_agent("dbiever")
+            .user_agent("fathom")
             .connect_timeout(Duration::from_secs(10))
             // Local models can take a while to load before the first token.
             .read_timeout(Duration::from_secs(300))

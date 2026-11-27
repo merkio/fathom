@@ -1,6 +1,6 @@
-# DBiever: Rules for Claude Code
+# Fathom: Rules for Claude Code
 
-DBiever is a desktop database client in Rust (egui) with LLM assistance. The roadmap is in `PLAN.md`. Work on one milestone at a time.
+Fathom is a desktop database client in Rust (egui) with LLM assistance. The roadmap is in `PLAN.md`. Work on one milestone at a time.
 
 ## Architecture (non-negotiable)
 Clean Architecture in a Cargo workspace. Dependencies point inward: `ui-egui` → `application` → `domain`. Adapters (`db-*`, `llm-*`, `storage`) implement ports defined in `application`. Only `crates/app` wires concrete types.
