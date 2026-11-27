@@ -11,13 +11,13 @@ use crate::bridge::Event;
 use crate::presenter::Presenter;
 use crate::views;
 
-pub struct DbieverApp {
+pub struct FathomApp {
     presenter: Presenter,
     backend: Backend,
     events: Receiver<Event>,
 }
 
-impl DbieverApp {
+impl FathomApp {
     pub fn new(ctx: &egui::Context, use_cases: Arc<UseCases>) -> Self {
         let presenter = Presenter::new(use_cases.dialects(), use_cases.llm_providers());
         let repaint = ctx.clone();
@@ -42,7 +42,7 @@ impl DbieverApp {
     }
 }
 
-impl eframe::App for DbieverApp {
+impl eframe::App for FathomApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.pump_events();
         views::show(ui, &mut self.presenter);
@@ -54,13 +54,13 @@ impl eframe::App for DbieverApp {
 pub fn run(use_cases: Arc<UseCases>) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("DBiever")
+            .with_title("Fathom")
             .with_inner_size([1280.0, 800.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "DBiever",
+        "Fathom",
         options,
-        Box::new(move |cc| Ok(Box::new(DbieverApp::new(&cc.egui_ctx, use_cases)))),
+        Box::new(move |cc| Ok(Box::new(FathomApp::new(&cc.egui_ctx, use_cases)))),
     )
 }

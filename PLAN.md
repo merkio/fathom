@@ -1,4 +1,4 @@
-# DBiever: Implementation Plan
+# Fathom: Implementation Plan
 
 A desktop database client (DBeaver-style) written in Rust, with LLM assistance.
 Written to be executed step by step in Claude Code. Work one milestone at a time. Each milestone ends with a passing `cargo test` and `cargo clippy`.
@@ -34,7 +34,7 @@ Written to be executed step by step in Claude Code. Work one milestone at a time
 Dependencies point inward only: `ui` → `application` → `domain`. Adapters (infra) implement ports defined in `application`. Only the `app` binary knows concrete types.
 
 ```
-dbiever/
+fathom/
 ├── Cargo.toml                  # workspace
 ├── CLAUDE.md                   # rules for Claude Code
 ├── PLAN.md
@@ -182,7 +182,7 @@ Each milestone: **Goal / Tasks / Done when**. Keep PRs small.
 - **Done when:** tests prove stale requests are cancelled and that nothing is sent while the setting is off; manual test with Ollama.
 
 ### M8. Hardening
-- Result export, SSH/TLS options, large-result handling, error UX, logging with secret redaction, packaging (Linux/macOS/Windows).
+- Result export, TLS options (SSH tunnelling removed from scope), large-result handling, error UX, logging with secret redaction, packaging (Linux/macOS/Windows).
 - **Extensibility proof:** add a stub `db-sqlite` (or ClickHouse) adapter touching only the new crate and one line in `app`. This validates the architecture.
 - **Done when:** the stub adapter lands with no changes in `domain`, `application` or `ui-egui`.
 

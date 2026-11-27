@@ -82,7 +82,7 @@ impl Backend {
         });
 
         std::thread::Builder::new()
-            .name("dbiever-runtime".into())
+            .name("fathom-runtime".into())
             .spawn(move || {
                 let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()

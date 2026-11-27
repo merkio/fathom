@@ -1,9 +1,9 @@
 #![allow(dead_code, clippy::expect_used)]
 //! Shared helpers for the integration tests.
 //!
-//! Point the tests at a server with `DBIEVER_TEST_MYSQL_HOST` (and `_PORT`, `_USER`, `_PASSWORD`,
+//! Point the tests at a server with `FATHOM_TEST_MYSQL_HOST` (and `_PORT`, `_USER`, `_PASSWORD`,
 //! `_DB`), or enable the `containers` feature to start one through Docker
-//! (`DBIEVER_TEST_FLAVOR=mariadb` selects MariaDB instead of MySQL).
+//! (`FATHOM_TEST_FLAVOR=mariadb` selects MariaDB instead of MySQL).
 
 use domain::{ConnectionProfile, DriverKind};
 use secrecy::SecretString;
@@ -19,16 +19,16 @@ pub struct Server {
 }
 
 pub async fn server() -> Server {
-    if let Ok(host) = std::env::var("DBIEVER_TEST_MYSQL_HOST") {
+    if let Ok(host) = std::env::var("FATHOM_TEST_MYSQL_HOST") {
         let var = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_owned());
         return Server {
             host,
-            port: var("DBIEVER_TEST_MYSQL_PORT", "3306")
+            port: var("FATHOM_TEST_MYSQL_PORT", "3306")
                 .parse()
                 .unwrap_or(3306),
-            user: var("DBIEVER_TEST_MYSQL_USER", "root"),
-            password: var("DBIEVER_TEST_MYSQL_PASSWORD", ""),
-            database: var("DBIEVER_TEST_MYSQL_DB", "test"),
+            user: var("FATHOM_TEST_MYSQL_USER", "root"),
+            password: var("FATHOM_TEST_MYSQL_PASSWORD", ""),
+            database: var("FATHOM_TEST_MYSQL_DB", "test"),
             #[cfg(feature = "containers")]
             _container: None,
         };
@@ -36,7 +36,7 @@ pub async fn server() -> Server {
     #[cfg(feature = "containers")]
     {
         use testcontainers_modules::testcontainers::runners::AsyncRunner;
-        let mariadb = std::env::var("DBIEVER_TEST_FLAVOR").is_ok_and(|f| f == "mariadb");
+        let mariadb = std::env::var("FATHOM_TEST_FLAVOR").is_ok_and(|f| f == "mariadb");
         // Both images allow the empty root password the modules configure; the database is `test`.
         let (container, port): (Box<dyn std::any::Any>, u16) = if mariadb {
             let c = testcontainers_modules::mariadb::Mariadb::default()
@@ -63,21 +63,21 @@ pub async fn server() -> Server {
         }
     }
     #[cfg(not(feature = "containers"))]
-    panic!("set DBIEVER_TEST_MYSQL_HOST (and friends) or enable the `containers` feature");
+    panic!("set FATHOM_TEST_MYSQL_HOST (and friends) or enable the `containers` feature");
 }
 
 /// Profile and password for the server, using the driver's default `sslmode` (prefer TLS).
 ///
 /// MySQL 8+ authenticates with `caching_sha2_password`, which only works over a plaintext
 /// connection through an RSA exchange this build does not include, so TLS must stay on. Set
-/// `DBIEVER_TEST_MYSQL_SSLMODE` to override (e.g. `disable` for a server without TLS).
+/// `FATHOM_TEST_MYSQL_SSLMODE` to override (e.g. `disable` for a server without TLS).
 pub fn profile_for(s: &Server) -> (ConnectionProfile, SecretString) {
     let mut profile =
         ConnectionProfile::new("integration", DriverKind::new("mysql"), s.host.clone());
     profile.port = Some(s.port);
     profile.username = s.user.clone();
     profile.database = Some(s.database.clone());
-    if let Ok(mode) = std::env::var("DBIEVER_TEST_MYSQL_SSLMODE") {
+    if let Ok(mode) = std::env::var("FATHOM_TEST_MYSQL_SSLMODE") {
         profile.options.insert("sslmode".into(), mode);
     }
     (profile, SecretString::from(s.password.clone()))

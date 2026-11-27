@@ -15,14 +15,14 @@ pub struct Server {
 }
 
 pub async fn server() -> Server {
-    if let Ok(host) = std::env::var("DBIEVER_TEST_PG_HOST") {
+    if let Ok(host) = std::env::var("FATHOM_TEST_PG_HOST") {
         let var = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_owned());
         return Server {
             host,
-            port: var("DBIEVER_TEST_PG_PORT", "5432").parse().unwrap_or(5432),
-            user: var("DBIEVER_TEST_PG_USER", "postgres"),
-            password: var("DBIEVER_TEST_PG_PASSWORD", ""),
-            database: var("DBIEVER_TEST_PG_DB", "postgres"),
+            port: var("FATHOM_TEST_PG_PORT", "5432").parse().unwrap_or(5432),
+            user: var("FATHOM_TEST_PG_USER", "postgres"),
+            password: var("FATHOM_TEST_PG_PASSWORD", ""),
+            database: var("FATHOM_TEST_PG_DB", "postgres"),
             #[cfg(feature = "containers")]
             _container: None,
         };
@@ -49,7 +49,7 @@ pub async fn server() -> Server {
         }
     }
     #[cfg(not(feature = "containers"))]
-    panic!("set DBIEVER_TEST_PG_HOST (and friends) or enable the `containers` feature");
+    panic!("set FATHOM_TEST_PG_HOST (and friends) or enable the `containers` feature");
 }
 
 /// Profile and password for the server, with TLS off (the test servers have none).

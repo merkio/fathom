@@ -43,22 +43,22 @@ jobs:
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: dbiever
+            binary: fathom
             archive: tar.gz
           - name: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
-            binary: dbiever
+            binary: fathom
             archive: tar.gz
           - name: macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
-            binary: dbiever
+            binary: fathom
             archive: tar.gz
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: dbiever.exe
+            binary: fathom.exe
             archive: zip
     runs-on: ${{ matrix.os }}
     steps:
@@ -73,7 +73,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          NAME="dbiever-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          NAME="fathom-${GITHUB_REF_NAME}-${{ matrix.name }}"
           mkdir "$NAME"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" LICENSE README.md "$NAME/"
           if [ "${{ matrix.archive }}" = "zip" ]; then

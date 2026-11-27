@@ -66,7 +66,7 @@ fn options(
         .host(&profile.host)
         .port(profile.port.unwrap_or(5432))
         .username(&profile.username)
-        .application_name("dbiever")
+        .application_name("fathom")
         .ssl_mode(ssl_mode(profile)?);
     if let Some(db) = &profile.database {
         opts = opts.database(db);

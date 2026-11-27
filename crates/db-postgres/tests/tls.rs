@@ -1,9 +1,9 @@
 //! TLS behaviour against a TLS-enabled PostgreSQL.
 //!
 //! Needs a server with `ssl = on` whose certificate is valid for the test host (SAN `127.0.0.1`
-//! or the host in `DBIEVER_TEST_PG_HOST`), plus:
-//! - `DBIEVER_TEST_PG_TLS_CA`: the CA certificate that signed the server certificate
-//! - `DBIEVER_TEST_PG_TLS_OTHER_CA`: an unrelated CA certificate (must NOT verify the server)
+//! or the host in `FATHOM_TEST_PG_HOST`), plus:
+//! - `FATHOM_TEST_PG_TLS_CA`: the CA certificate that signed the server certificate
+//! - `FATHOM_TEST_PG_TLS_OTHER_CA`: an unrelated CA certificate (must NOT verify the server)
 //!
 //! Without these variables the tests skip, because plain CI servers have no TLS.
 #![cfg(feature = "integration")]
@@ -21,8 +21,8 @@ struct Tls {
 }
 
 fn tls() -> Option<Tls> {
-    let ca = std::env::var("DBIEVER_TEST_PG_TLS_CA").ok()?;
-    let other_ca = std::env::var("DBIEVER_TEST_PG_TLS_OTHER_CA").ok()?;
+    let ca = std::env::var("FATHOM_TEST_PG_TLS_CA").ok()?;
+    let other_ca = std::env::var("FATHOM_TEST_PG_TLS_OTHER_CA").ok()?;
     Some(Tls { ca, other_ca })
 }
 
