@@ -2,8 +2,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use application::ports::{DbError, DbSession, IntrospectScope};
+use application::sql::changes::{self, BuildOptions, ParamStyle};
 use async_trait::async_trait;
-use domain::{DataType, QueryLanguage, QueryRequest, QueryResult, ResultColumn, SchemaTree, Value};
+use domain::{
+    ApplyOutcome, DataType, QueryLanguage, QueryRequest, QueryResult, ResultColumn, SchemaTree,
+    TableChanges, Value,
+};
 use rusqlite::{Connection, InterruptHandle};
 
 use crate::introspect;
@@ -114,6 +118,61 @@ impl DbSession for SqliteSession {
             },
         };
         outcome.map_err(|e| DbError::Query(e.to_string()))?
+    }
+
+    async fn apply_changes(&self, edits: TableChanges) -> Result<ApplyOutcome, DbError> {
+        // SQLite converts bound values by column affinity, so values bind natively.
+        let plans = changes::build(
+            BuildOptions {
+                dialect: &crate::driver::SQLITE_DIALECT,
+                style: ParamStyle::Question,
+                casts: false,
+                mutations: false,
+            },
+            &edits,
+        )?;
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = lock(&conn);
+            let tx = guard.transaction().map_err(map_error)?;
+            let mut affected = 0u64;
+            for plan in &plans {
+                let params: Vec<rusqlite::types::Value> = plan
+                    .params
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int(i) => Ok(rusqlite::types::Value::Integer(*i)),
+                        Value::Float(f) => Ok(rusqlite::types::Value::Real(*f)),
+                        Value::Bool(b) => Ok(rusqlite::types::Value::Integer(i64::from(*b))),
+                        Value::Text(t)
+                        | Value::Decimal(t)
+                        | Value::Temporal(t)
+                        | Value::Json(t) => Ok(rusqlite::types::Value::Text(t.clone())),
+                        Value::Bytes(_) | Value::Null => {
+                            Err(DbError::Query("internal: unsupported parameter".into()))
+                        }
+                    })
+                    .collect::<Result<_, _>>()?;
+                let n = tx
+                    .execute(&plan.sql, rusqlite::params_from_iter(params))
+                    .map_err(map_error)?;
+                if plan.one_row && n != 1 {
+                    // Dropping the transaction rolls everything back.
+                    return Err(DbError::Query(format!(
+                        "a change touched {n} rows instead of 1 (the data changed?); nothing was applied"
+                    )));
+                }
+                affected += n as u64;
+            }
+            tx.commit().map_err(map_error)?;
+            Ok(ApplyOutcome {
+                applied: plans.len(),
+                rows_affected: Some(affected),
+                atomic: true,
+            })
+        })
+        .await
+        .map_err(|e| DbError::Query(e.to_string()))?
     }
 
     async fn cancel(&self) -> Result<(), DbError> {

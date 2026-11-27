@@ -1,8 +1,9 @@
 use std::time::{Duration, Instant};
 
 use application::ports::{DbError, DbSession, IntrospectScope};
+use application::sql::changes::{self, BuildOptions, ParamStyle};
 use async_trait::async_trait;
-use domain::{DataType, QueryLanguage};
+use domain::{ApplyOutcome, DataType, QueryLanguage, TableChanges, Value};
 use domain::{QueryRequest, QueryResult, ResultColumn, SchemaTree};
 use futures::StreamExt;
 use sqlx::postgres::PgConnection;
@@ -133,6 +134,48 @@ impl DbSession for PostgresSession {
                 }
             },
         }
+    }
+
+    async fn apply_changes(&self, edits: TableChanges) -> Result<ApplyOutcome, DbError> {
+        // Values travel as text parameters and are converted to each column's type in SQL.
+        let plans = changes::build(
+            BuildOptions {
+                dialect: &crate::dialect::POSTGRES_DIALECT,
+                style: ParamStyle::Dollar,
+                casts: true,
+                mutations: false,
+            },
+            &edits,
+        )?;
+        let mut conn = self.conn.lock().await;
+        let mut tx = sqlx::Connection::begin(&mut *conn)
+            .await
+            .map_err(map_error)?;
+        let mut affected = 0u64;
+        for plan in &plans {
+            let mut query = sqlx::query(AssertSqlSafe(plan.sql.clone()));
+            for value in &plan.params {
+                let Value::Text(text) = value else {
+                    return Err(DbError::Query("internal: expected text parameters".into()));
+                };
+                query = query.bind(text.clone());
+            }
+            let done = query.execute(&mut *tx).await.map_err(map_error)?;
+            if plan.one_row && done.rows_affected() != 1 {
+                // Dropping the transaction rolls everything back.
+                return Err(DbError::Query(format!(
+                    "a change touched {} rows instead of 1 (the data changed?); nothing was applied",
+                    done.rows_affected()
+                )));
+            }
+            affected += done.rows_affected();
+        }
+        tx.commit().await.map_err(map_error)?;
+        Ok(ApplyOutcome {
+            applied: plans.len(),
+            rows_affected: Some(affected),
+            atomic: true,
+        })
     }
 
     async fn cancel(&self) -> Result<(), DbError> {

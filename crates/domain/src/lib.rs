@@ -1,5 +1,6 @@
 //! Domain entities and value objects. No I/O, no async runtime, no framework dependencies.
 
+pub mod changes;
 pub mod connection;
 pub mod dialect;
 pub mod error;
@@ -7,6 +8,7 @@ pub mod llm;
 pub mod query;
 pub mod schema;
 
+pub use changes::{ApplyOutcome, RowChange, TableChanges};
 pub use connection::{ConnectionId, ConnectionProfile, DriverKind, SecretRef};
 pub use dialect::{Dialect, LimitStyle};
 pub use error::DomainError;

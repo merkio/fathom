@@ -136,6 +136,12 @@ pub enum Command {
     SaveUiPrefs(UiPrefs),
     /// Which databases of an instance the explorer shows.
     LoadVisibility(ConnectionId),
+    /// Applies the user's reviewed row edits (never sent without their explicit action).
+    ApplyChanges {
+        tab: TabId,
+        session: SessionId,
+        changes: domain::TableChanges,
+    },
     SaveVisibility {
         connection: ConnectionId,
         visible: Vec<String>,
@@ -235,6 +241,10 @@ pub enum Event {
     },
     InlineSettings(Result<InlineSettings, String>),
     UiPrefs(Result<UiPrefs, String>),
+    ChangesApplied {
+        tab: TabId,
+        result: Result<domain::ApplyOutcome, String>,
+    },
     /// `None`: the user has not chosen yet (everything is shown).
     Visibility {
         connection: ConnectionId,

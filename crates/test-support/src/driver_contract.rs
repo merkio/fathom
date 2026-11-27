@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use application::ports::{DatabaseDriver, DbError, DbSession, IntrospectScope};
-use domain::{ConnectionProfile, QueryRequest, SchemaTree, Table, Value};
+use domain::{ConnectionProfile, QueryRequest, RowChange, SchemaTree, Table, TableChanges, Value};
 use futures::future::BoxFuture;
 use secrecy::SecretString;
 
@@ -25,6 +25,10 @@ pub struct Capabilities {
     /// `UPDATE` runs synchronously and reports how many rows it changed (analytical stores that
     /// apply updates as background mutations do not).
     pub update_row_counts: bool,
+    /// A failing batch of row edits leaves nothing applied (no transactions: false).
+    pub atomic_changes: bool,
+    /// An edit whose row no longer exists is an error rather than a silent no-op.
+    pub detects_missing_rows: bool,
 }
 
 impl Default for Capabilities {
@@ -32,6 +36,8 @@ impl Default for Capabilities {
         Self {
             foreign_keys: true,
             update_row_counts: true,
+            atomic_changes: true,
+            detects_missing_rows: true,
         }
     }
 }
@@ -102,6 +108,7 @@ pub async fn run_database_driver_contract(
     errors(session.as_ref()).await;
     introspection(session.as_ref(), f).await;
     writes_and_limits(session.as_ref(), f).await;
+    row_changes(session.as_ref(), f).await;
     timeout_and_cancel(session.as_ref(), f, &sleep).await;
 
     for sql in &f.teardown {
@@ -293,4 +300,121 @@ async fn timeout_and_cancel(session: &dyn DbSession, f: &DriverFixture, sleep: &
         "contract: cancel did not interrupt"
     );
     run(session, "SELECT 1").await; // still usable
+}
+
+fn parent_changes(tree: &SchemaTree, changes: Vec<RowChange>) -> TableChanges {
+    let (schema, parent) = tree
+        .find_table("contract_parent")
+        .unwrap_or_else(|| panic!("contract: contract_parent missing"));
+    TableChanges {
+        schema: Some(schema.to_owned()),
+        table: parent.name.clone(),
+        column_types: parent
+            .columns
+            .iter()
+            .map(|c| (c.name.clone(), c.data_type.0.clone()))
+            .collect(),
+        changes,
+    }
+}
+
+fn id(n: i64) -> Vec<(String, Value)> {
+    vec![("id".into(), Value::Int(n))]
+}
+
+/// Edits keyed by primary key: update, set NULL, delete, atomic rollback, missing rows.
+async fn row_changes(session: &dyn DbSession, f: &DriverFixture) {
+    let tree = must(session.introspect(IntrospectScope::All).await, "introspect");
+
+    // Rows 1..=5 exist from the previous step.
+    let batch = parent_changes(
+        &tree,
+        vec![
+            RowChange::Update {
+                key: id(3),
+                set: vec![
+                    ("name".into(), Value::Text("renamed".into())),
+                    ("note".into(), Value::Text("it's \"quoted\"; --".into())),
+                ],
+            },
+            RowChange::Update {
+                key: id(4),
+                set: vec![("note".into(), Value::Null)],
+            },
+            RowChange::Delete { key: id(5) },
+        ],
+    );
+    let outcome = must(session.apply_changes(batch).await, "apply changes");
+    assert_eq!(outcome.applied, 3, "contract: applied count");
+    assert_eq!(
+        outcome.atomic, f.capabilities.atomic_changes,
+        "contract: atomic flag"
+    );
+
+    let r = run(
+        session,
+        "SELECT id, name, note FROM contract_parent WHERE id >= 3 ORDER BY id",
+    )
+    .await;
+    assert_eq!(
+        r.rows,
+        vec![
+            vec![
+                Value::Int(3),
+                Value::Text("renamed".into()),
+                Value::Text("it's \"quoted\"; --".into())
+            ],
+            vec![Value::Int(4), Value::Text("d".into()), Value::Null],
+        ],
+        "contract: edits (and the deleted row) are visible"
+    );
+    let untouched = run(session, "SELECT name FROM contract_parent WHERE id = 1").await;
+    assert_eq!(
+        untouched.rows,
+        vec![vec![Value::Text("a".into())]],
+        "contract: other rows untouched"
+    );
+
+    // A batch with a bad change must not leave the good one behind.
+    if f.capabilities.atomic_changes {
+        let bad = parent_changes(
+            &tree,
+            vec![
+                RowChange::Update {
+                    key: id(1),
+                    set: vec![("name".into(), Value::Text("must-roll-back".into()))],
+                },
+                RowChange::Update {
+                    key: id(2),
+                    set: vec![("no_such_column".into(), Value::Text("x".into()))],
+                },
+            ],
+        );
+        // The unknown column is rejected before anything runs when the builder needs its type,
+        // or by the database; either way nothing may be applied.
+        assert!(
+            session.apply_changes(bad).await.is_err(),
+            "contract: a failing batch must fail"
+        );
+        let r = run(session, "SELECT name FROM contract_parent WHERE id = 1").await;
+        assert_eq!(
+            r.rows,
+            vec![vec![Value::Text("a".into())]],
+            "contract: rollback"
+        );
+    }
+
+    if f.capabilities.detects_missing_rows {
+        let missing = parent_changes(
+            &tree,
+            vec![RowChange::Update {
+                key: id(999),
+                set: vec![("name".into(), Value::Text("ghost".into()))],
+            }],
+        );
+        assert!(
+            session.apply_changes(missing).await.is_err(),
+            "contract: an edit of a missing row must fail"
+        );
+    }
 }

@@ -18,7 +18,7 @@ pub use bundle::{ExportOptions, Ports, UseCases};
 pub use connections::{
     CloseSession, DeleteConnection, ListConnections, OpenSession, SaveConnection, TestConnection,
 };
-pub use data::{BrowseSchema, ExecuteOptions, ExecuteQuery, QueryHistory};
+pub use data::{ApplyChanges, BrowseSchema, ExecuteOptions, ExecuteQuery, QueryHistory};
 pub use explorer::ExplorerVisibilityStore;
 pub use export::{DEFAULT_MAX_EXPORT_ROWS, ExportResult, ExportSummary};
 pub use inline::{

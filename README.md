@@ -24,6 +24,16 @@ optional LLM assistance. It connects to PostgreSQL, MySQL/MariaDB, ClickHouse an
   explain, optimize, fix from an error, chat about the schema. Optional inline (ghost text) suggestions
 - Generated SQL is classified (read / write / DDL), shown for review, and **never run automatically**
 
+## Editing rows
+
+Results of a plain `SELECT` from one table that has a primary key can be edited in the grid:
+
+- Double-click a cell to change it (type `NULL` to set NULL). Primary key cells are read-only, because rows are identified by them.
+- Tick rows and press **Delete rows** to mark them for deletion.
+- Nothing touches the database until you press **Review & apply**, read the list of changes and confirm. The grid is then reloaded from the database.
+
+Edits run as parameterised `UPDATE`/`DELETE` statements keyed by the full primary key. On PostgreSQL, MySQL/MariaDB and SQLite the whole batch runs in one transaction and is rolled back unless every change affected exactly one row. ClickHouse has no transactions: changes run one by one as mutations and a failure leaves the earlier ones applied (the review dialog says so). Read-only connections never allow edits. Joins, aliases, expressions, `DISTINCT`, grouping and views are not editable.
+
 ## Privacy: what leaves your machine
 
 | Feature | What is sent | Default |

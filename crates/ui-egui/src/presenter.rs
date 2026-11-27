@@ -19,8 +19,10 @@ use crate::bridge::{AiAsk, AiTask, Command, Event, SessionId, TabId};
 use crate::form::ConnectionForm;
 use crate::inline::{Ghost, InlineState, Snapshot};
 
+mod grid;
 mod instances;
 mod palette;
+pub use grid::{GridState, NULL_TEXT, ReviewKind, ReviewLine};
 pub use instances::{DatabaseRow, InstanceTab, InstancesState};
 pub use palette::{PaletteAction, PaletteItem, PaletteState};
 
@@ -79,6 +81,8 @@ pub struct QueryTab {
     executed: String,
     pub state: TabState,
     pub completion: CompletionState,
+    /// Staged row edits for the current result.
+    pub grid: GridState,
 }
 
 /// Export controls under the result grid.
@@ -299,6 +303,7 @@ impl Presenter {
             executed: String::new(),
             state: TabState::Idle,
             completion: CompletionState::default(),
+            grid: GridState::default(),
         });
         self.select_tab(id);
         Some(id)
@@ -944,6 +949,7 @@ impl Presenter {
             Event::InlineSettings(Err(e)) => {
                 self.error(format!("Could not load inline settings: {e}"))
             }
+            Event::ChangesApplied { tab, result } => self.on_changes_applied(tab, result),
             Event::Visibility {
                 connection,
                 result: Ok(choice),
@@ -1104,6 +1110,8 @@ impl Presenter {
             Ok(r) => TabState::Done(r),
             Err(e) => TabState::Failed(e),
         };
+        // A new result: whatever was staged for the old one no longer applies.
+        tab.grid = GridState::default();
         if stale_schema {
             // The statement changed the schema, so the cached metadata (and with it the
             // autocomplete data) is out of date.
@@ -2917,5 +2925,290 @@ mod tests {
             titles(&p),
             ["Theme: light", "Theme: dark", "Theme: follow the system"]
         );
+    }
+
+    // ---- row editing -------------------------------------------------------------------------
+
+    fn keyed_schema() -> SchemaTree {
+        use domain::{Catalog, Column, DataType, Schema, Table, TableKind};
+        let col = |n: &str, ty: &str| Column {
+            name: n.into(),
+            data_type: DataType::new(ty),
+            nullable: true,
+            default: None,
+        };
+        let mut customers = Table::new("customers", TableKind::Table);
+        customers.columns = vec![
+            col("id", "integer"),
+            col("name", "text"),
+            col("plan", "text"),
+        ];
+        customers.primary_key = vec!["id".into()];
+        SchemaTree {
+            catalogs: vec![Catalog {
+                name: "db".into(),
+                schemas: vec![Schema {
+                    name: "public".into(),
+                    tables: vec![customers],
+                }],
+            }],
+        }
+    }
+
+    fn customers_result() -> QueryResult {
+        use domain::{DataType, ResultColumn};
+        let c = |n: &str| ResultColumn {
+            name: n.into(),
+            data_type: DataType::new("text"),
+        };
+        let row = |id: i64, name: &str, plan: Option<&str>| {
+            vec![
+                domain::Value::Int(id),
+                domain::Value::Text(name.into()),
+                plan.map_or(domain::Value::Null, |p| domain::Value::Text(p.into())),
+            ]
+        };
+        QueryResult {
+            columns: vec![c("id"), c("name"), c("plan")],
+            rows: vec![
+                row(1042, "Olivia", Some("Free")),
+                row(1041, "Liam", None),
+                row(1040, "Emma", Some("Pro")),
+            ],
+            elapsed: Duration::ZERO,
+            ..QueryResult::empty()
+        }
+    }
+
+    /// A tab that ran `sql` against a connection whose schema has the keyed `customers` table.
+    fn grid_ready_with(sql: &str, read_only: bool) -> (Presenter, TabId) {
+        let mut p = presenter();
+        let mut profile = profile();
+        profile.set_read_only(read_only);
+        let id = profile.id;
+        p.handle(Event::Connections(Ok(vec![profile])));
+        p.connect(id);
+        p.handle(Event::Connected {
+            connection: id,
+            result: Ok(SessionId(1)),
+        });
+        p.handle(Event::Schema {
+            session: SessionId(1),
+            result: Ok(keyed_schema()),
+        });
+        let tab = p.selected.expect("tab");
+        p.tab_mut(tab).expect("tab").text = sql.into();
+        p.run(tab);
+        p.handle(Event::QueryFinished {
+            tab,
+            result: Ok(customers_result()),
+        });
+        p.take_commands();
+        (p, tab)
+    }
+
+    fn grid_ready() -> (Presenter, TabId) {
+        grid_ready_with("SELECT * FROM public.customers", false)
+    }
+
+    fn edit(p: &mut Presenter, tab: TabId, row: usize, col: usize, text: &str) {
+        p.begin_cell_edit(tab, row, col);
+        p.tab_mut(tab).expect("tab").grid.draft = text.into();
+        p.commit_cell_edit(tab);
+    }
+
+    #[test]
+    fn plain_selects_are_editable_everything_else_is_not() {
+        let (mut p, tab) = grid_ready();
+        assert!(p.grid_source(tab).is_some());
+        let (mut p, tab) =
+            grid_ready_with("SELECT * FROM public.customers a JOIN x ON true", false);
+        assert!(p.grid_source(tab).is_none());
+        let (mut p, tab) = grid_ready_with("SELECT * FROM public.customers", true);
+        assert!(
+            p.grid_source(tab).is_none(),
+            "read-only connections never edit"
+        );
+    }
+
+    #[test]
+    fn staging_sends_nothing_to_the_database() {
+        let (mut p, tab) = grid_ready();
+        edit(&mut p, tab, 0, 2, "Pro");
+        p.toggle_row_selected(tab, 1);
+        p.stage_delete_selected(tab);
+        p.open_review(tab);
+        assert!(p.take_commands().is_empty());
+    }
+
+    #[test]
+    fn key_columns_cannot_be_edited_and_other_cells_start_from_their_value() {
+        let (mut p, tab) = grid_ready();
+        p.begin_cell_edit(tab, 0, 0);
+        assert_eq!(p.tabs[0].grid.editing, None, "the id identifies the row");
+        p.begin_cell_edit(tab, 0, 1);
+        assert_eq!(p.tabs[0].grid.editing, Some((0, 1)));
+        assert_eq!(p.tabs[0].grid.draft, "Olivia");
+        p.cancel_cell_edit(tab);
+        p.begin_cell_edit(tab, 1, 2);
+        assert_eq!(p.tabs[0].grid.draft, NULL_TEXT, "a NULL cell shows NULL");
+    }
+
+    #[test]
+    fn typing_the_original_text_again_unstages_the_edit() {
+        let (mut p, tab) = grid_ready();
+        edit(&mut p, tab, 0, 1, "Olivia C.");
+        assert_eq!(p.pending_counts(tab), (1, 0));
+        edit(&mut p, tab, 0, 1, "Olivia");
+        assert_eq!(p.pending_counts(tab), (0, 0));
+    }
+
+    #[test]
+    fn staged_changes_are_keyed_by_primary_key_and_carry_column_types() {
+        let (mut p, tab) = grid_ready();
+        edit(&mut p, tab, 0, 2, "Pro");
+        edit(&mut p, tab, 1, 1, "NULL"); // typing NULL sets NULL ...
+        edit(&mut p, tab, 2, 1, "Emma W."); // ... and this row is then deleted
+        p.toggle_row_selected(tab, 2);
+        p.stage_delete_selected(tab);
+        let c = p.staged_changes(tab).expect("changes");
+        assert_eq!(c.schema.as_deref(), Some("public"));
+        assert_eq!(c.table, "customers");
+        assert_eq!(c.column_type("id"), Some("integer"));
+        use domain::{RowChange, Value};
+        assert_eq!(
+            c.changes,
+            vec![
+                RowChange::Update {
+                    key: vec![("id".into(), Value::Int(1042))],
+                    set: vec![("plan".into(), Value::Text("Pro".into()))],
+                },
+                RowChange::Update {
+                    key: vec![("id".into(), Value::Int(1041))],
+                    set: vec![("name".into(), Value::Null)],
+                },
+                RowChange::Delete {
+                    key: vec![("id".into(), Value::Int(1040))],
+                },
+            ],
+            "the edit on the deleted row is dropped"
+        );
+    }
+
+    #[test]
+    fn deleting_a_row_drops_its_edits_and_can_be_taken_back() {
+        let (mut p, tab) = grid_ready();
+        edit(&mut p, tab, 2, 1, "x");
+        p.toggle_row_selected(tab, 2);
+        p.stage_delete_selected(tab);
+        assert_eq!(p.pending_counts(tab), (0, 1));
+        assert!(p.tabs[0].grid.selected.is_empty());
+        p.begin_cell_edit(tab, 2, 1);
+        assert_eq!(p.tabs[0].grid.editing, None, "deleted rows are not edited");
+        p.unstage_delete(tab, 2);
+        assert_eq!(p.pending_counts(tab), (0, 0));
+    }
+
+    #[test]
+    fn apply_sends_once_and_only_when_there_is_something_to_apply() {
+        let (mut p, tab) = grid_ready();
+        p.apply_staged(tab);
+        assert!(p.take_commands().is_empty(), "nothing staged");
+        edit(&mut p, tab, 0, 2, "Pro");
+        p.apply_staged(tab);
+        p.apply_staged(tab); // a double click
+        let cmds = p.take_commands();
+        assert_eq!(cmds.len(), 1, "{cmds:?}");
+        assert!(matches!(&cmds[0], Command::ApplyChanges { tab: t, .. } if *t == tab));
+        assert!(p.tabs[0].grid.applying);
+    }
+
+    #[test]
+    fn success_clears_the_staging_and_reruns_the_statement_that_ran() {
+        let (mut p, tab) = grid_ready();
+        edit(&mut p, tab, 0, 2, "Pro");
+        // The user types something else in the editor meanwhile.
+        p.tab_mut(tab).expect("tab").text = "SELECT 'unrelated'".into();
+        p.apply_staged(tab);
+        p.take_commands();
+        p.handle(Event::ChangesApplied {
+            tab,
+            result: Ok(domain::ApplyOutcome {
+                applied: 1,
+                rows_affected: Some(1),
+                atomic: true,
+            }),
+        });
+        assert!(!p.tabs[0].grid.has_pending() && !p.tabs[0].grid.applying);
+        assert!(matches!(p.tabs[0].state, TabState::Running));
+        assert!(matches!(
+            p.take_commands().as_slice(),
+            [Command::Execute { text, .. }] if text == "SELECT * FROM public.customers"
+        ));
+        assert!(matches!(&p.status, Some(Status::Info(m)) if m.contains("transaction")));
+    }
+
+    #[test]
+    fn failure_keeps_everything_the_user_staged() {
+        let (mut p, tab) = grid_ready();
+        edit(&mut p, tab, 0, 2, "Pro");
+        p.apply_staged(tab);
+        p.take_commands();
+        p.handle(Event::ChangesApplied {
+            tab,
+            result: Err("a change touched 0 rows".into()),
+        });
+        assert!(p.tabs[0].grid.has_pending(), "staged edits survive");
+        assert!(!p.tabs[0].grid.applying, "the user can try again");
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("0 rows")));
+        assert!(p.take_commands().is_empty(), "no rerun after a failure");
+    }
+
+    #[test]
+    fn a_new_result_discards_what_was_staged_for_the_old_one() {
+        let (mut p, tab) = grid_ready();
+        edit(&mut p, tab, 0, 2, "Pro");
+        p.handle(Event::QueryFinished {
+            tab,
+            result: Ok(customers_result()),
+        });
+        assert!(!p.tabs[0].grid.has_pending());
+    }
+
+    #[test]
+    fn the_review_lists_old_and_new_values_and_deletions() {
+        let (mut p, tab) = grid_ready();
+        edit(&mut p, tab, 0, 2, "Pro");
+        edit(&mut p, tab, 1, 2, "Team"); // was NULL
+        p.toggle_row_selected(tab, 2);
+        p.stage_delete_selected(tab);
+        let lines = p.review_lines(tab);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].kind, ReviewKind::Update);
+        assert_eq!(lines[0].row, "1042");
+        assert_eq!(
+            lines[0].columns,
+            [("plan".to_owned(), "Free".to_owned(), "Pro".to_owned())]
+        );
+        assert_eq!(
+            lines[1].columns,
+            [("plan".to_owned(), "NULL".to_owned(), "Team".to_owned())],
+            "an old NULL is shown as NULL"
+        );
+        assert_eq!(lines[2].kind, ReviewKind::Delete);
+        assert_eq!(lines[2].row, "1040");
+        assert_eq!(lines[2].label, "Emma");
+    }
+
+    #[test]
+    fn discard_clears_everything_including_the_review() {
+        let (mut p, tab) = grid_ready();
+        edit(&mut p, tab, 0, 2, "Pro");
+        p.open_review(tab);
+        assert!(p.tabs[0].grid.review_open);
+        p.discard_changes(tab);
+        assert!(!p.tabs[0].grid.has_pending() && !p.tabs[0].grid.review_open);
+        p.open_review(tab);
+        assert!(!p.tabs[0].grid.review_open, "nothing to review");
     }
 }

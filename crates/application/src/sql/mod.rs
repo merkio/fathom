@@ -1,6 +1,7 @@
 //! SQL text helpers shared by autocomplete and the editor: a tolerant lexer, scope detection,
 //! completion and highlighting. Everything here is pure and synchronous (no I/O).
 
+pub mod changes;
 pub mod complete;
 pub mod highlight;
 pub mod lexer;
