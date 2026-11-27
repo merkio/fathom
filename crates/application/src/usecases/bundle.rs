@@ -12,8 +12,8 @@ use crate::ports::{
 use crate::registry::{DriverRegistry, LlmRegistry};
 use crate::usecases::{
     AiSettingsStore, ApiKeys, Assistant, BrowseSchema, CloseSession, DeleteConnection,
-    ExecuteOptions, ExecuteQuery, ListConnections, ListModels, OpenSession, QueryHistory,
-    SaveConnection, SuggestInline, TestConnection, UiPrefsStore,
+    ExecuteOptions, ExecuteQuery, ExplorerVisibilityStore, ListConnections, ListModels,
+    OpenSession, QueryHistory, SaveConnection, SuggestInline, TestConnection, UiPrefsStore,
 };
 
 /// The adapters (as ports) the use cases need.
@@ -64,6 +64,7 @@ pub struct UseCases {
     pub suggest_inline: SuggestInline,
     pub export: ExportOptions,
     pub ui_prefs: UiPrefsStore,
+    pub explorer_visibility: ExplorerVisibilityStore,
     drivers: Arc<DriverRegistry>,
     providers: Arc<LlmRegistry>,
 }
@@ -93,6 +94,7 @@ impl UseCases {
             suggest_inline: SuggestInline::new(providers.clone(), settings.clone()),
             export: ExportOptions::default(),
             ui_prefs: UiPrefsStore::new(settings.clone()),
+            explorer_visibility: ExplorerVisibilityStore::new(settings.clone()),
             ai_settings: AiSettingsStore::new(settings),
             api_keys: ApiKeys::new(providers.clone(), secrets),
             list_models: ListModels::new(providers.clone()),

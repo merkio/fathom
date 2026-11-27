@@ -19,7 +19,9 @@ use crate::bridge::{AiAsk, AiTask, Command, Event, SessionId, TabId};
 use crate::form::ConnectionForm;
 use crate::inline::{Ghost, InlineState, Snapshot};
 
+mod instances;
 mod palette;
+pub use instances::{DatabaseRow, InstanceTab, InstancesState};
 pub use palette::{PaletteAction, PaletteItem, PaletteState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +120,14 @@ pub struct Presenter {
     pub prefs: UiPrefs,
     /// The command palette, when open.
     pub palette: Option<PaletteState>,
+    /// The "Database instances" dialog, when open.
+    pub instances: Option<InstancesState>,
+    /// Saved explorer choices (instances without an entry show everything).
+    pub visibility: std::collections::HashMap<ConnectionId, Vec<String>>,
+    /// Set by "Connect & choose databases": open the dialog once this connection is up.
+    choose_after_connect: Option<ConnectionId>,
+    /// Set while a save started by "Connect & choose databases" is in flight.
+    connect_after_save: bool,
     /// Text in the explorer's "Find an object" box (filters tables by name).
     pub explorer_filter: String,
     /// Where the editor cursor was last drawn (tab, byte offset), for the status bar.
@@ -165,6 +175,10 @@ impl Presenter {
             },
             prefs: UiPrefs::default(),
             palette: None,
+            instances: None,
+            visibility: std::collections::HashMap::new(),
+            choose_after_connect: None,
+            connect_after_save: false,
             explorer_filter: String::new(),
             last_cursor: None,
             dialects,
@@ -209,6 +223,21 @@ impl Presenter {
                     .push(Command::SaveConnection { profile, password });
             }
             Err(e) => self.status = Some(Status::Error(e)),
+        }
+    }
+
+    /// "Connect & choose databases": saves the form, connects, then opens the instances dialog
+    /// so the user picks what the explorer shows (nothing is added to it automatically).
+    pub fn save_form_and_choose(&mut self) {
+        self.connect_after_save = true;
+        self.save_form();
+        // An invalid form sends nothing; do not leave the flag armed for a later save.
+        if !self
+            .outbox
+            .iter()
+            .any(|c| matches!(c, Command::SaveConnection { .. }))
+        {
+            self.connect_after_save = false;
         }
     }
 
@@ -915,6 +944,18 @@ impl Presenter {
             Event::InlineSettings(Err(e)) => {
                 self.error(format!("Could not load inline settings: {e}"))
             }
+            Event::Visibility {
+                connection,
+                result: Ok(choice),
+            } => {
+                match choice {
+                    Some(names) => self.visibility.insert(connection, names),
+                    None => self.visibility.remove(&connection),
+                };
+            }
+            Event::Visibility { result: Err(e), .. } => {
+                self.error(format!("Could not load the explorer choice: {e}"))
+            }
             Event::UiPrefs(Ok(prefs)) => self.prefs = prefs,
             Event::UiPrefs(Err(e)) => self.error(format!("Could not load layout settings: {e}")),
             Event::Notice(Ok(message)) => self.status = Some(Status::Info(message)),
@@ -946,8 +987,15 @@ impl Presenter {
                 self.form = None;
                 self.status = Some(Status::Info(format!("Saved `{}`", profile.name)));
                 self.outbox.push(Command::LoadConnections);
+                if std::mem::take(&mut self.connect_after_save) {
+                    self.choose_after_connect = Some(profile.id);
+                    self.connect(profile.id);
+                }
             }
-            Event::Saved(Err(e)) => self.error(format!("Could not save: {e}")),
+            Event::Saved(Err(e)) => {
+                self.connect_after_save = false;
+                self.error(format!("Could not save: {e}"));
+            }
             Event::Deleted(Ok(_)) => self.outbox.push(Command::LoadConnections),
             Event::Deleted(Err(e)) => self.error(format!("Could not delete: {e}")),
             Event::TestFinished(result) => {
@@ -1016,6 +1064,11 @@ impl Presenter {
         });
         self.outbox.push(Command::LoadSchema(session));
         self.new_tab(session);
+        self.outbox.push(Command::LoadVisibility(connection));
+        if self.choose_after_connect == Some(connection) {
+            self.choose_after_connect = None;
+            self.open_instances(Some(connection));
+        }
         self.status = Some(Status::Info(format!("Connected to `{name}`")));
     }
 
@@ -2631,5 +2684,238 @@ mod tests {
         let before = p.tabs.len();
         p.run_palette(PaletteAction::NewQuery);
         assert_eq!(p.tabs.len(), before + 1);
+    }
+
+    // ---- database instances ------------------------------------------------------------------
+
+    fn two_schemas() -> SchemaTree {
+        use domain::{Catalog, Schema, Table, TableKind};
+        let t = |n: &str| Table::new(n, TableKind::Table);
+        SchemaTree {
+            catalogs: vec![Catalog {
+                name: "db".into(),
+                schemas: vec![
+                    Schema {
+                        name: "commerce".into(),
+                        tables: vec![t("a"), t("b")],
+                    },
+                    Schema {
+                        name: "analytics".into(),
+                        tables: vec![t("c")],
+                    },
+                    Schema {
+                        name: "audit".into(),
+                        tables: vec![],
+                    },
+                ],
+            }],
+        }
+    }
+
+    fn instances_ready() -> (Presenter, ConnectionId) {
+        let (mut p, id, session, _) = connected();
+        p.handle(Event::Schema {
+            session,
+            result: Ok(two_schemas()),
+        });
+        (p, id)
+    }
+
+    #[test]
+    fn connecting_loads_the_saved_explorer_choice() {
+        let mut p = presenter();
+        let profile = profile();
+        let id = profile.id;
+        p.handle(Event::Connections(Ok(vec![profile])));
+        p.connect(id);
+        p.take_commands();
+        p.handle(Event::Connected {
+            connection: id,
+            result: Ok(SessionId(1)),
+        });
+        assert!(
+            p.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::LoadVisibility(c) if *c == id))
+        );
+    }
+
+    #[test]
+    fn without_a_saved_choice_every_database_is_shown_and_ticked() {
+        let (mut p, id) = instances_ready();
+        assert!(p.is_database_visible(id, "audit"));
+        assert_eq!(p.shown_databases(id), Some((3, 3)));
+        p.open_instances(None);
+        let state = p.instances.clone().expect("dialog open");
+        assert_eq!(state.selected, Some(id));
+        assert_eq!(state.checked.len(), 3);
+        let rows = p.visible_database_rows();
+        assert_eq!(rows[0].name, "commerce");
+        assert_eq!(rows[0].tables, 2);
+    }
+
+    #[test]
+    fn saving_keeps_server_order_hides_the_rest_and_closes_the_dialog() {
+        let (mut p, id) = instances_ready();
+        p.open_instances(Some(id));
+        p.toggle_database("audit");
+        p.save_visibility();
+        assert!(p.instances.is_none());
+        assert!(!p.is_database_visible(id, "audit"));
+        assert!(p.is_database_visible(id, "analytics"));
+        assert_eq!(p.shown_databases(id), Some((2, 3)));
+        assert!(matches!(
+            p.take_commands().as_slice(),
+            [Command::SaveVisibility { connection, visible }]
+                if *connection == id && visible == &["commerce", "analytics"]
+        ));
+    }
+
+    #[test]
+    fn the_search_box_filters_the_checklist_and_select_all_follows_it() {
+        let (mut p, id) = instances_ready();
+        p.open_instances(Some(id));
+        for name in ["commerce", "analytics", "audit"] {
+            p.toggle_database(name); // untick everything
+        }
+        assert!(p.instances.as_ref().is_some_and(|s| s.checked.is_empty()));
+        if let Some(state) = p.instances.as_mut() {
+            state.search = "AN".into();
+        }
+        let names: Vec<_> = p
+            .visible_database_rows()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, ["analytics"]);
+        p.select_all_databases();
+        assert_eq!(
+            p.instances
+                .as_ref()
+                .map(|s| s.checked.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["analytics".to_owned()])
+        );
+    }
+
+    #[test]
+    fn choosing_nothing_is_saved_as_an_empty_choice() {
+        let (mut p, id) = instances_ready();
+        p.open_instances(Some(id));
+        for name in ["commerce", "analytics", "audit"] {
+            p.toggle_database(name);
+        }
+        p.save_visibility();
+        assert_eq!(p.shown_databases(id), Some((0, 3)));
+    }
+
+    #[test]
+    fn loaded_choices_replace_and_clear_local_state() {
+        let (mut p, id) = instances_ready();
+        p.handle(Event::Visibility {
+            connection: id,
+            result: Ok(Some(vec!["audit".into()])),
+        });
+        assert!(!p.is_database_visible(id, "commerce"));
+        p.handle(Event::Visibility {
+            connection: id,
+            result: Ok(None),
+        });
+        assert!(p.is_database_visible(id, "commerce"));
+        p.handle(Event::Visibility {
+            connection: id,
+            result: Err("boom".into()),
+        });
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("boom")));
+    }
+
+    #[test]
+    fn an_instance_that_is_not_connected_lists_no_databases_but_keeps_its_saved_choice() {
+        let mut p = presenter();
+        let profile = profile();
+        let id = profile.id;
+        p.handle(Event::Connections(Ok(vec![profile])));
+        p.handle(Event::Visibility {
+            connection: id,
+            result: Ok(Some(vec!["kept".into()])),
+        });
+        p.open_instances(Some(id));
+        assert!(p.visible_database_rows().is_empty());
+        p.save_visibility();
+        assert!(matches!(
+            p.take_commands().as_slice(),
+            [.., Command::SaveVisibility { visible, .. }] if visible == &["kept"]
+        ));
+    }
+
+    #[test]
+    fn connect_and_choose_opens_the_dialog_once_the_new_instance_is_up() {
+        let mut p = presenter();
+        p.new_connection_form();
+        if let Some(form) = p.form.as_mut() {
+            form.name = "Reporting".into();
+            form.driver_kind = "postgres".into();
+            form.host = "reporting.internal".into();
+            form.username = "analyst".into();
+        }
+        p.save_form_and_choose();
+        let saved = p
+            .take_commands()
+            .into_iter()
+            .find_map(|c| match c {
+                Command::SaveConnection { profile, .. } => Some(profile),
+                _ => None,
+            })
+            .expect("save command");
+        let id = saved.id;
+        p.handle(Event::Saved(Ok(saved.clone())));
+        p.handle(Event::Connections(Ok(vec![saved])));
+        assert!(
+            p.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::Connect(c) if *c == id))
+        );
+        assert!(p.instances.is_none(), "not before it is connected");
+        p.handle(Event::Connected {
+            connection: id,
+            result: Ok(SessionId(7)),
+        });
+        assert_eq!(p.instances.as_ref().and_then(|s| s.selected), Some(id));
+    }
+
+    #[test]
+    fn an_invalid_form_does_not_arm_connect_and_choose() {
+        let mut p = presenter();
+        p.new_connection_form();
+        if let Some(form) = p.form.as_mut() {
+            form.port = "not a port".into();
+        }
+        p.save_form_and_choose();
+        assert!(p.take_commands().is_empty());
+        // A later plain save must not connect by surprise.
+        p.handle(Event::Saved(Ok(profile())));
+        assert!(
+            !p.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::Connect(_)))
+        );
+    }
+
+    #[test]
+    fn title_matches_rank_above_description_only_matches() {
+        let mut p = presenter();
+        p.open_palette();
+        p.set_palette_query("instances".into());
+        let ranked = titles(&p);
+        assert_eq!(ranked[0], "Database instances", "{ranked:?}");
+        assert!(
+            ranked.contains(&"Explorer".to_owned()),
+            "still listed, after the title match"
+        );
+        // Within the same rank the original order is kept.
+        p.set_palette_query("theme".into());
+        assert_eq!(
+            titles(&p),
+            ["Theme: light", "Theme: dark", "Theme: follow the system"]
+        );
     }
 }
