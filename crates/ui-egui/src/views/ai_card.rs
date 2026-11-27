@@ -7,6 +7,7 @@
 use eframe::egui::{self, Frame, Key, Margin, RichText, Stroke};
 
 use crate::ai::{AiMode, AiRunState};
+use crate::keymap::Action;
 use crate::presenter::Presenter;
 use crate::theme;
 
@@ -16,7 +17,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
     let pal = *theme::palette(ui);
     let input_id = ui.make_persistent_id(INPUT_ID);
     // Ctrl+I jumps here.
-    if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::I)) {
+    if p.fired(Action::AskAi) {
         ui.memory_mut(|m| m.request_focus(input_id));
     }
 
@@ -99,7 +100,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
                             match p.ai.run.as_ref().map(|r| &r.state) {
                                 None if ready => {
                                     ui.label(
-                                        RichText::new("Ctrl+I")
+                                        RichText::new(p.keymap.hint(Action::AskAi).unwrap_or_default())
                                             .size(11.0)
                                             .background_color(pal.bg)
                                             .color(pal.text_muted),

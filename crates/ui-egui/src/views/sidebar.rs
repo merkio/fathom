@@ -6,6 +6,7 @@ use eframe::egui::{self, Frame, Margin, Panel, RichText, Sense};
 use domain::ConnectionId;
 
 use crate::bridge::SessionId;
+use crate::keymap::Action;
 use crate::presenter::{Load, Presenter};
 use crate::theme;
 
@@ -54,7 +55,11 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
             {
                 p.new_connection_form();
             }
-            ui.label(RichText::new("Ctrl 1").size(10.5).color(pal.text_faint));
+            ui.label(
+                RichText::new(p.keymap.hint(Action::ToggleExplorer).unwrap_or_default())
+                    .size(10.5)
+                    .color(pal.text_faint),
+            );
         });
     });
     ui.add(

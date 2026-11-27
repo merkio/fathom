@@ -8,6 +8,7 @@ use eframe::egui;
 
 use crate::backend::Backend;
 use crate::bridge::Event;
+use crate::keymap::Keymap;
 use crate::presenter::Presenter;
 use crate::theme;
 use crate::views;
@@ -21,9 +22,10 @@ pub struct FathomApp {
 }
 
 impl FathomApp {
-    pub fn new(ctx: &egui::Context, use_cases: Arc<UseCases>) -> Self {
+    pub fn new(ctx: &egui::Context, use_cases: Arc<UseCases>, keymap: Keymap) -> Self {
         theme::apply(ctx, ThemePreference::System);
-        let presenter = Presenter::new(use_cases.dialects(), use_cases.llm_providers());
+        let mut presenter = Presenter::new(use_cases.dialects(), use_cases.llm_providers());
+        presenter.set_keymap(keymap);
         let repaint = ctx.clone();
         let (backend, events) = Backend::spawn(use_cases, move || repaint.request_repaint());
         Self {
@@ -60,7 +62,7 @@ impl eframe::App for FathomApp {
 }
 
 /// Opens the main window and blocks until it is closed.
-pub fn run(use_cases: Arc<UseCases>) -> eframe::Result {
+pub fn run(use_cases: Arc<UseCases>, keymap: Keymap) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Fathom")
@@ -70,6 +72,6 @@ pub fn run(use_cases: Arc<UseCases>) -> eframe::Result {
     eframe::run_native(
         "Fathom",
         options,
-        Box::new(move |cc| Ok(Box::new(FathomApp::new(&cc.egui_ctx, use_cases)))),
+        Box::new(move |cc| Ok(Box::new(FathomApp::new(&cc.egui_ctx, use_cases, keymap)))),
     )
 }

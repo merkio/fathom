@@ -33,6 +33,8 @@ pub struct Config {
     pub enabled: Vec<String>,
     pub max_export_rows: Option<u32>,
     pub destinations: Vec<DestinationConfig>,
+    /// The `[keys]` table: action id → key combinations (an empty list unbinds the action).
+    pub keys: std::collections::BTreeMap<String, Vec<String>>,
     /// Things wrong with individual entries (those entries are skipped).
     pub problems: Vec<String>,
 }
@@ -199,7 +201,37 @@ pub fn parse(
             }
         }
     }
+    if let Some(keys) = root.get("keys") {
+        match keys.as_table() {
+            Some(table) => {
+                for (action, value) in table {
+                    match parse_key_list(value) {
+                        Some(list) => {
+                            config.keys.insert(action.clone(), list);
+                        }
+                        None => config.problems.push(format!(
+                            "keys.{action} must be a key combination such as \"Ctrl+S\", a list of them, or \"none\""
+                        )),
+                    }
+                }
+            }
+            None => config
+                .problems
+                .push("`keys` must be a table: [keys]".into()),
+        }
+    }
     Ok(config)
+}
+
+fn parse_key_list(value: &toml::Value) -> Option<Vec<String>> {
+    match value {
+        toml::Value::String(s) => Some(vec![s.clone()]),
+        toml::Value::Array(items) => items
+            .iter()
+            .map(|i| i.as_str().map(str::to_owned))
+            .collect(),
+        _ => None,
+    }
 }
 
 /// Every built-in adapter kind: the default when the configuration does not say otherwise.
@@ -371,6 +403,20 @@ path = "/tmp/y"
     #[test]
     fn invalid_toml_is_an_error_for_the_caller_to_report() {
         assert!(parse("[export", &env(&[]), &no_files, None).is_err());
+    }
+
+    #[test]
+    fn the_keys_table_accepts_a_string_or_a_list_and_reports_other_types() {
+        let c = parse_with(
+            "[keys]\nrun_query = \"Ctrl+R\"\nsave_query = [\"Ctrl+S\", \"F2\"]\nexport_data = []\nfocus_mode = 5",
+            &[],
+        );
+        assert_eq!(c.keys["run_query"], ["Ctrl+R"]);
+        assert_eq!(c.keys["save_query"], ["Ctrl+S", "F2"]);
+        assert!(c.keys["export_data"].is_empty());
+        assert!(!c.keys.contains_key("focus_mode"));
+        assert_eq!(c.problems.len(), 1);
+        assert!(c.problems[0].contains("keys.focus_mode"));
     }
 
     #[test]

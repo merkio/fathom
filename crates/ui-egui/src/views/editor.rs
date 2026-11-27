@@ -1,4 +1,6 @@
-use eframe::egui::{self, Key, KeyboardShortcut, Modifiers, Panel, RichText, Stroke};
+use eframe::egui::{self, Panel, RichText, Stroke};
+
+use crate::keymap::Action;
 
 use crate::bridge::TabId;
 use crate::presenter::{Presenter, TabState};
@@ -16,7 +18,6 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
 
     let running = matches!(p.selected_tab().map(|t| &t.state), Some(TabState::Running));
     let (mut run, mut cancel, mut save) = (false, false, false);
-    let shortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.add_space(8.0);
@@ -43,13 +44,19 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(8.0);
-            let label = format!("Run query   {}", ui.ctx().format_shortcut(&shortcut));
+            let label = format!(
+                "Run query   {}",
+                p.keymap.hint(Action::RunQuery).unwrap_or_default()
+            );
             run = ui
                 .add_enabled(!running, theme::primary_button(label))
                 .clicked();
             save = ui
                 .button("Save")
-                .on_hover_text("Keep this query under a name (Ctrl+S)")
+                .on_hover_text(format!(
+                    "Keep this query under a name ({})",
+                    p.keymap.hint(Action::SaveQuery).unwrap_or_default()
+                ))
                 .clicked();
             if running {
                 cancel = ui.button("Cancel").clicked();
@@ -59,7 +66,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
         });
     });
     ui.add_space(6.0);
-    if !running && ui.input_mut(|i| i.consume_shortcut(&shortcut)) {
+    if !running && p.fired(Action::RunQuery) {
         run = true;
     }
 

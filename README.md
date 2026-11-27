@@ -81,6 +81,26 @@ explains why. Without a file, exports go to a "Local exports" folder in your doc
 | `s3` | `bucket`, optional `region`, `prefix`, `endpoint`, `profile`, keys | Needs `s3:PutObject` and `s3:GetObject`; an `endpoint` switches to path-style addressing for MinIO, R2 and similar |
 | `smb`, `nfs` | `path` (the mount point) | Mount the share with your OS first; Fathom refuses to write if it is not mounted |
 
+
+## Keyboard shortcuts
+
+Every action has a default shortcut and can be given your own in the `[keys]` table of
+`fathom.toml` (the same file as the export destinations; see
+[`fathom.example.toml`](fathom.example.toml) for all action names, the default bindings and
+examples):
+
+```toml
+[keys]
+run_query = "F5"
+save_query = ["Ctrl+S", "F2"]   # several combinations per action
+export_data = "none"            # remove a shortcut
+```
+
+`Ctrl` means Control on Windows and Linux and Command on macOS. Open **Keyboard shortcuts** in the
+command palette (`Ctrl+K`) to see what is in force, which shortcuts you changed, and any mistakes
+in the table (unknown action, unknown key, two actions on one combination). Restart Fathom after
+editing the file. Copy, paste and text-editing keys belong to your system.
+
 ## Privacy: what leaves your machine
 
 | Feature | What is sent | Default |

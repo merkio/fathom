@@ -136,6 +136,12 @@ pub struct Presenter {
     pub storage_kinds: Vec<String>,
     /// Theme and panel visibility (saved; loaded at start-up).
     pub prefs: UiPrefs,
+    /// The key bindings in force (defaults plus `[keys]` from `fathom.toml`).
+    pub keymap: crate::keymap::Keymap,
+    /// The actions whose shortcuts were pressed this frame.
+    pub fired: Vec<crate::keymap::Action>,
+    /// The Keyboard shortcuts dialog is open.
+    pub shortcuts_dialog: bool,
     /// The command palette, when open.
     pub palette: Option<PaletteState>,
     /// The "Database instances" dialog, when open.
@@ -208,6 +214,9 @@ impl Presenter {
             storage_form: None,
             storage_kinds: Vec::new(),
             prefs: UiPrefs::default(),
+            keymap: crate::keymap::Keymap::default(),
+            fired: Vec::new(),
+            shortcuts_dialog: false,
             palette: None,
             instances: None,
             visibility: std::collections::HashMap::new(),
@@ -227,6 +236,16 @@ impl Presenter {
     }
 
     /// Commands produced since the last call.
+    /// Replaces the key bindings (from `fathom.toml`).
+    pub fn set_keymap(&mut self, keymap: crate::keymap::Keymap) {
+        self.keymap = keymap;
+    }
+
+    /// Whether the shortcut of `action` was pressed this frame.
+    pub fn fired(&self, action: crate::keymap::Action) -> bool {
+        self.fired.contains(&action)
+    }
+
     pub fn take_commands(&mut self) -> Vec<Command> {
         std::mem::take(&mut self.outbox)
     }
@@ -2851,6 +2870,40 @@ mod tests {
         // Already in focus mode: nothing to save.
         p.run_palette(PaletteAction::FocusMode);
         assert!(p.take_commands().is_empty());
+    }
+
+    #[test]
+    fn reset_layout_restores_the_default_panels_and_keeps_the_theme() {
+        let mut p = presenter();
+        p.prefs.explorer = false;
+        p.prefs.side_panel = true;
+        p.prefs.theme = ThemePreference::Dark;
+        p.take_commands();
+        p.run_palette(PaletteAction::ResetLayout);
+        assert!(p.prefs.explorer && p.prefs.results && !p.prefs.side_panel);
+        assert_eq!(p.prefs.theme, ThemePreference::Dark);
+        assert_eq!(p.take_commands().len(), 1);
+        // Already default: nothing to save.
+        p.run_palette(PaletteAction::ResetLayout);
+        assert!(p.take_commands().is_empty());
+    }
+
+    #[test]
+    fn palette_hints_follow_the_configured_keymap() {
+        use crate::keymap::{Action, Keymap};
+        let mut p = presenter();
+        let overrides = [("save_query".to_owned(), vec!["F2".to_owned()])].into();
+        p.set_keymap(Keymap::with_overrides(&overrides));
+        p.open_palette();
+        let save = p
+            .palette_items()
+            .into_iter()
+            .find(|i| i.action == PaletteAction::SaveQuery)
+            .expect("save item");
+        assert_eq!(save.shortcut.as_deref(), Some("F2"));
+        assert_eq!(p.keymap.hint(Action::SaveQuery).as_deref(), Some("F2"));
+        p.run_palette(PaletteAction::KeyboardShortcuts);
+        assert!(p.shortcuts_dialog);
     }
 
     #[test]

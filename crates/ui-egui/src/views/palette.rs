@@ -144,7 +144,7 @@ fn row(
                         };
                         ui.label(RichText::new(text).color(color).strong());
                     }
-                    if let Some(shortcut) = item.shortcut {
+                    if let Some(shortcut) = &item.shortcut {
                         ui.label(RichText::new(shortcut).size(11.0).color(pal.text_muted));
                     }
                 });

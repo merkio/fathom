@@ -12,14 +12,14 @@ mod instances;
 mod palette;
 mod results;
 mod saved;
+mod shortcuts_dialog;
 mod sidebar;
 mod storage;
 
 use application::usecases::ThemePreference;
-use eframe::egui::{
-    self, Frame, Key, KeyboardShortcut, Margin, Modifiers, Panel, RichText, Stroke,
-};
+use eframe::egui::{self, Frame, Margin, Panel, RichText, Stroke};
 
+use crate::keymap::Action;
 use crate::presenter::{Presenter, RightPanel, Status};
 use crate::theme;
 
@@ -74,61 +74,53 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
     export::show(ui.ctx(), p);
     saved::save_dialog(ui.ctx(), p);
     instances::show(ui.ctx(), p);
+    shortcuts_dialog::show(ui.ctx(), p);
     palette::show(ui.ctx(), p);
 }
 
 /// Window-wide shortcuts. The palette owns the keyboard while it is open.
 fn shortcuts(ui: &egui::Ui, p: &mut Presenter) {
-    let cmd = Modifiers::COMMAND;
-    let (mut open, mut focus, mut explorer, mut results, mut side, mut export, mut save) =
-        (false, false, false, false, false, false, false);
-    let mut review = false;
-    ui.input_mut(|i| {
-        // The shifted shortcut first: `Cmd+F` must not swallow `Cmd+Shift+F`.
-        // Shifted shortcuts first, so `Cmd+Enter` (run) cannot swallow `Cmd+Shift+Enter`.
-        review = i.consume_shortcut(&KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::Enter));
-        focus = i.consume_shortcut(&KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::F));
-        export = i.consume_shortcut(&KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::E));
-        save = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::S));
-        open = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::K));
-        explorer = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Num1));
-        results = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Num2));
-        side = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::H));
-    });
-    if open {
+    let keymap = p.keymap.clone();
+    p.fired = ui.input_mut(|i| keymap.poll(i));
+    if p.fired(Action::CommandPalette) {
         if p.palette.is_some() {
             p.close_palette();
         } else {
             p.open_palette();
         }
     }
-    if focus {
+    if p.fired(Action::FocusMode) {
         p.focus_mode();
     }
-    if export {
+    if p.fired(Action::ExportData) {
         p.open_export_dialog();
     }
-    if save {
+    if p.fired(Action::SaveQuery) {
         p.save_current();
     }
-    if review && let Some(tab) = p.selected {
+    if p.fired(Action::ReviewChanges)
+        && let Some(tab) = p.selected
+    {
         p.open_review(tab);
     }
-    if explorer {
+    if p.fired(Action::ToggleExplorer) {
         p.toggle_explorer();
     }
-    if results {
+    if p.fired(Action::ToggleResults) {
         p.toggle_results();
     }
-    if side {
+    if p.fired(Action::ToggleSidePanel) {
         p.toggle_side_panel();
+    }
+    if p.fired(Action::ResetLayout) {
+        p.reset_layout();
     }
 }
 
 /// App name, the open query's breadcrumb, the layout menu, the theme switch and the palette.
 fn header(ui: &mut egui::Ui, p: &mut Presenter) {
     let pal = *theme::palette(ui);
-    let cmd_k = KeyboardShortcut::new(Modifiers::COMMAND, Key::K);
+    let cmd_k = p.keymap.hint(Action::CommandPalette).unwrap_or_default();
     ui.horizontal(|ui| {
         ui.set_min_height(36.0);
         ui.label(RichText::new("Fathom").strong().size(14.0));
@@ -143,10 +135,8 @@ fn header(ui: &mut egui::Ui, p: &mut Presenter) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(
-                    egui::Button::new(
-                        RichText::new(ui.ctx().format_shortcut(&cmd_k)).color(pal.text_muted),
-                    )
-                    .min_size(egui::vec2(64.0, 28.0)),
+                    egui::Button::new(RichText::new(cmd_k).color(pal.text_muted))
+                        .min_size(egui::vec2(64.0, 28.0)),
                 )
                 .on_hover_text("Search commands, tables and queries")
                 .clicked()
@@ -172,10 +162,7 @@ fn header(ui: &mut egui::Ui, p: &mut Presenter) {
             ui.separator();
             let layout = RichText::new(format!(
                 "\u{25A4}  Layout   {}",
-                ui.ctx().format_shortcut(&KeyboardShortcut::new(
-                    Modifiers::COMMAND | Modifiers::SHIFT,
-                    Key::L
-                ))
+                p.keymap.hint(Action::ResetLayout).unwrap_or_default()
             ))
             .color(pal.text_muted);
             ui.menu_button(layout, |ui| {
@@ -189,6 +176,11 @@ fn header(ui: &mut egui::Ui, p: &mut Presenter) {
                 }
                 if ui.checkbox(&mut side, "History and AI panel").changed() {
                     p.toggle_side_panel();
+                }
+                ui.separator();
+                if ui.button("Reset layout").clicked() {
+                    p.reset_layout();
+                    ui.close();
                 }
             });
             if let Some(crumb) = crumb {

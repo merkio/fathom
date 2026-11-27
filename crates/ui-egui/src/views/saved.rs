@@ -1,5 +1,6 @@
 use eframe::egui::{self, Frame, Margin, RichText, Stroke};
 
+use crate::keymap::Action;
 use crate::presenter::Presenter;
 use crate::theme;
 
@@ -10,9 +11,12 @@ pub fn sidebar(ui: &mut egui::Ui, p: &mut Presenter) {
     theme::section_label(ui, "Saved queries");
     if p.saved.is_empty() {
         ui.label(
-            RichText::new("Press Ctrl+S to keep a query")
-                .size(11.0)
-                .color(pal.text_muted),
+            RichText::new(format!(
+                "Press {} to keep a query",
+                p.keymap.hint(Action::SaveQuery).unwrap_or_default()
+            ))
+            .size(11.0)
+            .color(pal.text_muted),
         );
         return;
     }

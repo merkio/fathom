@@ -191,5 +191,9 @@ fn main() -> anyhow::Result<()> {
     })
     .with_destinations(storage);
 
-    ui_egui::run(Arc::new(use_cases)).map_err(|e| anyhow!("{e}"))
+    let keymap = ui_egui::Keymap::with_overrides(&config.keys);
+    for problem in keymap.problems() {
+        tracing::warn!(problem = %problem, "keyboard shortcut configuration");
+    }
+    ui_egui::run(Arc::new(use_cases), keymap).map_err(|e| anyhow!("{e}"))
 }

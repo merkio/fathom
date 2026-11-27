@@ -13,6 +13,7 @@ use eframe::egui::{
 use std::time::Instant;
 
 use crate::bridge::TabId;
+use crate::keymap::Action;
 use crate::presenter::Presenter;
 
 const POPUP_MAX_HEIGHT: f32 = 220.0;
@@ -143,7 +144,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter, tab: TabId, height: f32) {
             .map(|t| t.text.clone())
             .unwrap_or_default();
         if let Some(cursor) = cursor_byte(&ctx, edit_id, &text) {
-            if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Space)) {
+            if p.fired(Action::Autocomplete) {
                 p.request_popup(tab, cursor);
             }
             let shown = p.popup(tab, cursor);

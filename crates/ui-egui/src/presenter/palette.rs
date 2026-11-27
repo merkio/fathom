@@ -7,6 +7,7 @@ use application::usecases::ThemePreference;
 
 use super::Presenter;
 use crate::bridge::SessionId;
+use crate::keymap::Action;
 
 /// Tables shown for a query, so a large schema does not flood the list.
 const MAX_TABLE_RESULTS: usize = 8;
@@ -26,6 +27,8 @@ pub enum PaletteAction {
     SaveQueryAs,
     OpenSaved(domain::SavedQueryId),
     StorageConnections,
+    ResetLayout,
+    KeyboardShortcuts,
     OpenTable {
         session: SessionId,
         schema: String,
@@ -39,7 +42,7 @@ pub struct PaletteItem {
     pub section: &'static str,
     pub title: String,
     pub subtitle: String,
-    pub shortcut: Option<&'static str>,
+    pub shortcut: Option<String>,
     /// `Some(on)` for items that are switches.
     pub toggle: Option<bool>,
 }
@@ -55,7 +58,7 @@ fn item(
     section: &'static str,
     title: &str,
     subtitle: &str,
-    shortcut: Option<&'static str>,
+    shortcut: Option<String>,
     toggle: Option<bool>,
 ) -> PaletteItem {
     PaletteItem {
@@ -113,7 +116,7 @@ impl Presenter {
                 "Workspace",
                 "Enter focus mode",
                 "Hide distractions. Keep your query and results.",
-                Some("Ctrl+Shift+F"),
+                self.keymap.hint(Action::FocusMode),
                 None,
             ),
             item(
@@ -121,7 +124,7 @@ impl Presenter {
                 "Workspace",
                 "Explorer",
                 "Instances and schema tree",
-                Some("Ctrl+1"),
+                self.keymap.hint(Action::ToggleExplorer),
                 Some(self.prefs.explorer),
             ),
             item(
@@ -129,7 +132,7 @@ impl Presenter {
                 "Workspace",
                 "Results panel",
                 "The grid under the editor",
-                Some("Ctrl+2"),
+                self.keymap.hint(Action::ToggleResults),
                 Some(self.prefs.results),
             ),
             item(
@@ -145,7 +148,7 @@ impl Presenter {
                 "Workspace",
                 "Query history",
                 "The panel with history and the AI assistant",
-                Some("Ctrl+H"),
+                self.keymap.hint(Action::ToggleSidePanel),
                 Some(self.prefs.side_panel),
             ),
             item(
@@ -169,7 +172,7 @@ impl Presenter {
                 "Workspace",
                 "Save query",
                 "Keep this SQL under a name",
-                Some("Ctrl+S"),
+                self.keymap.hint(Action::SaveQuery),
                 None,
             ),
             item(
@@ -185,7 +188,23 @@ impl Presenter {
                 "Workspace",
                 "Export results...",
                 "Save the results as a file in an export destination",
-                Some("Ctrl+Shift+E"),
+                self.keymap.hint(Action::ExportData),
+                None,
+            ),
+            item(
+                PaletteAction::ResetLayout,
+                "Workspace",
+                "Reset layout",
+                "Explorer and results on, history and AI panel off",
+                self.keymap.hint(Action::ResetLayout),
+                None,
+            ),
+            item(
+                PaletteAction::KeyboardShortcuts,
+                "Workspace",
+                "Keyboard shortcuts",
+                "See and change the key bindings",
+                None,
                 None,
             ),
             item(
@@ -314,6 +333,8 @@ impl Presenter {
             PaletteAction::SaveQueryAs => self.open_save_dialog(true),
             PaletteAction::OpenSaved(id) => self.open_saved(id),
             PaletteAction::StorageConnections => self.open_storage_dialog(),
+            PaletteAction::ResetLayout => self.reset_layout(),
+            PaletteAction::KeyboardShortcuts => self.shortcuts_dialog = true,
             PaletteAction::NewQuery => {
                 let session = self
                     .selected_tab()
@@ -328,6 +349,19 @@ impl Presenter {
                 schema,
                 table,
             } => self.open_table(session, &schema, &table),
+        }
+    }
+
+    /// Explorer and results on, history/AI panel off: the layout a fresh install has.
+    pub fn reset_layout(&mut self) {
+        let fresh = application::usecases::UiPrefs {
+            theme: self.prefs.theme,
+            ..application::usecases::UiPrefs::default()
+        };
+        if fresh != self.prefs {
+            self.prefs = fresh;
+            self.outbox
+                .push(crate::bridge::Command::SaveUiPrefs(self.prefs));
         }
     }
 
