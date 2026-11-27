@@ -208,6 +208,28 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p db-clickhouse --features integration --locked
 
+  s3-integration:
+    name: Integration (S3, moto)
+    runs-on: ubuntu-latest
+    env:
+      FATHOM_TEST_S3_ENDPOINT: http://127.0.0.1:5000
+      FATHOM_TEST_S3_BUCKET: fathom-test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # moto is an S3 emulator; the adapter itself uses the official AWS SDK.
+      - name: Start an S3 emulator
+        run: |
+          python3 -m venv "$RUNNER_TEMP/moto"
+          "$RUNNER_TEMP/moto/bin/pip" install --quiet "moto[server]"
+          nohup "$RUNNER_TEMP/moto/bin/moto_server" -p 5000 > "$RUNNER_TEMP/moto.log" 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fs -X PUT "$FATHOM_TEST_S3_ENDPOINT/$FATHOM_TEST_S3_BUCKET" && break
+            sleep 1
+          done
+      - run: cargo test -p export-s3 --features integration --locked
+
   audit:
     name: Dependencies (cargo-deny)
     runs-on: ubuntu-latest

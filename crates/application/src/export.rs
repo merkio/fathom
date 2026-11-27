@@ -4,12 +4,16 @@
 use std::collections::HashSet;
 use std::io::{self, Write};
 
-use domain::{QueryResult, Value};
+use domain::{Dialect, QueryResult, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Csv,
     Json,
+    /// `INSERT` statements, one per row (for loading the data elsewhere; never run by Fathom).
+    Sql,
+    /// Apache Parquet (binary; column types are inferred from the values).
+    Parquet,
 }
 
 impl ExportFormat {
@@ -17,15 +21,95 @@ impl ExportFormat {
         match self {
             ExportFormat::Csv => "csv",
             ExportFormat::Json => "json",
+            ExportFormat::Sql => "sql",
+            ExportFormat::Parquet => "parquet",
+        }
+    }
+}
+
+/// What the SQL format needs to name the target table and quote identifiers.
+#[derive(Debug, Clone, Copy)]
+pub struct SqlOptions<'a> {
+    pub table: &'a str,
+    pub dialect: &'a Dialect,
+}
+
+impl Default for SqlOptions<'_> {
+    fn default() -> Self {
+        Self {
+            table: "exported_data",
+            dialect: &Dialect::ANSI,
         }
     }
 }
 
 pub fn write(result: &QueryResult, format: ExportFormat, out: &mut dyn Write) -> io::Result<()> {
+    write_with(result, format, &SqlOptions::default(), out)
+}
+
+pub fn write_with(
+    result: &QueryResult,
+    format: ExportFormat,
+    sql: &SqlOptions<'_>,
+    out: &mut dyn Write,
+) -> io::Result<()> {
     match format {
         ExportFormat::Csv => write_csv(result, out),
         ExportFormat::Json => write_json(result, out),
+        ExportFormat::Sql => write_sql(result, sql, out),
+        ExportFormat::Parquet => out.write_all(&crate::export_parquet::render_parquet(result)?),
     }
+}
+
+/// The whole document in memory (exports are capped, so this is bounded).
+pub fn render(
+    result: &QueryResult,
+    format: ExportFormat,
+    sql: &SqlOptions<'_>,
+) -> io::Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    write_with(result, format, sql, &mut buffer)?;
+    Ok(buffer)
+}
+
+fn sql_literal(v: &Value) -> String {
+    match v {
+        Value::Null => "NULL".into(),
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) if f.is_finite() => f.to_string(),
+        Value::Float(_) => "NULL".into(),
+        Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.into(),
+        Value::Decimal(d) if d.parse::<f64>().is_ok() && !d.contains(['e', 'E', ' ']) => d.clone(),
+        Value::Decimal(t) | Value::Text(t) | Value::Temporal(t) | Value::Json(t) => {
+            format!("'{}'", t.replace('\'', "''"))
+        }
+        Value::Bytes(b) => {
+            let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+            format!("X'{hex}'")
+        }
+    }
+}
+
+/// One `INSERT INTO table (columns) VALUES (...);` per row. Quotes are doubled and nothing else
+/// is interpreted, so the text is safe to read; it is a file, never executed here.
+pub fn write_sql(
+    result: &QueryResult,
+    options: &SqlOptions<'_>,
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    let d = options.dialect;
+    let columns = result
+        .columns
+        .iter()
+        .map(|c| d.quote_identifier(&c.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let table = d.quote_identifier(options.table);
+    for row in &result.rows {
+        let values = row.iter().map(sql_literal).collect::<Vec<_>>().join(", ");
+        writeln!(out, "INSERT INTO {table} ({columns}) VALUES ({values});")?;
+    }
+    Ok(())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -296,5 +380,87 @@ mod tests {
             ),
             ("csv", "json")
         );
+    }
+
+    #[test]
+    fn sql_export_writes_one_insert_per_row_with_escaped_literals() {
+        use domain::{DataType, ResultColumn};
+        let col = |n: &str| ResultColumn {
+            name: n.into(),
+            data_type: DataType::new("t"),
+        };
+        let result = QueryResult {
+            columns: vec![
+                col("id"),
+                col("na\"me"),
+                col("note"),
+                col("ok"),
+                col("blob"),
+                col("n"),
+            ],
+            rows: vec![
+                vec![
+                    Value::Int(1),
+                    Value::Text("O'Brien; DROP TABLE x; --".into()),
+                    Value::Null,
+                    Value::Bool(true),
+                    Value::Bytes(vec![0xde, 0xad]),
+                    Value::Decimal("12.50".into()),
+                ],
+                vec![
+                    Value::Int(2),
+                    Value::Text("b".into()),
+                    Value::Float(f64::NAN),
+                    Value::Bool(false),
+                    Value::Bytes(vec![]),
+                    Value::Decimal("1e5; evil".into()),
+                ],
+            ],
+            ..QueryResult::empty()
+        };
+        let text =
+            String::from_utf8(render(&result, ExportFormat::Sql, &SqlOptions::default()).unwrap())
+                .unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            r#"INSERT INTO "exported_data" ("id", "na""me", "note", "ok", "blob", "n") VALUES (1, 'O''Brien; DROP TABLE x; --', NULL, TRUE, X'dead', 12.50);"#
+        );
+        assert!(
+            lines[1].contains("NULL, FALSE, X'', '1e5; evil'"),
+            "{}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn sql_export_uses_the_given_table_and_dialect_quoting() {
+        use domain::{DataType, ResultColumn};
+        let result = QueryResult {
+            columns: vec![ResultColumn {
+                name: "id".into(),
+                data_type: DataType::new("t"),
+            }],
+            rows: vec![vec![Value::Int(7)]],
+            ..QueryResult::empty()
+        };
+        let mysql_like = Dialect {
+            identifier_quote: '`',
+            ..Dialect::ANSI
+        };
+        let text = String::from_utf8(
+            render(
+                &result,
+                ExportFormat::Sql,
+                &SqlOptions {
+                    table: "customers",
+                    dialect: &mysql_like,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(text, "INSERT INTO `customers` (`id`) VALUES (7);\n");
     }
 }

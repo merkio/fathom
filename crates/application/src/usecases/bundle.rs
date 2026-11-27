@@ -1,7 +1,6 @@
 //! Wiring helper: builds every use case from the ports once, so `app` stays a thin composition
 //! root and the UI receives ready-made use cases.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use domain::{DriverKind, ProviderId};
@@ -9,7 +8,7 @@ use domain::{DriverKind, ProviderId};
 use crate::ports::{
     Clock, ConnectionRepository, QueryHistoryRepository, SecretStore, SettingsRepository,
 };
-use crate::registry::{DriverRegistry, LlmRegistry};
+use crate::registry::{DestinationRegistry, DriverRegistry, LlmRegistry};
 use crate::usecases::{
     AiSettingsStore, ApiKeys, ApplyChanges, Assistant, BrowseSchema, CloseSession,
     DeleteConnection, ExecuteOptions, ExecuteQuery, ExplorerVisibilityStore, ListConnections,
@@ -31,18 +30,15 @@ pub struct Ports {
 /// Token budget for the schema part of a prompt.
 const SCHEMA_TOKEN_BUDGET: usize = 3000;
 
-/// Where exports go and how many rows they may hold.
+/// How many rows an export may hold. (Where files go is decided by the configured destinations.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportOptions {
-    /// Relative export names are placed here.
-    pub directory: PathBuf,
     pub max_rows: u32,
 }
 
 impl Default for ExportOptions {
     fn default() -> Self {
         Self {
-            directory: PathBuf::from("."),
             max_rows: crate::usecases::DEFAULT_MAX_EXPORT_ROWS,
         }
     }
@@ -65,6 +61,8 @@ pub struct UseCases {
     pub list_models: ListModels,
     pub suggest_inline: SuggestInline,
     pub export: ExportOptions,
+    /// The export destinations the user configured.
+    pub destinations: Arc<DestinationRegistry>,
     pub ui_prefs: UiPrefsStore,
     pub explorer_visibility: ExplorerVisibilityStore,
     drivers: Arc<DriverRegistry>,
@@ -96,6 +94,7 @@ impl UseCases {
             assistant: Assistant::new(providers.clone(), SCHEMA_TOKEN_BUDGET),
             suggest_inline: SuggestInline::new(providers.clone(), settings.clone()),
             export: ExportOptions::default(),
+            destinations: Arc::new(DestinationRegistry::new()),
             ui_prefs: UiPrefsStore::new(settings.clone()),
             explorer_visibility: ExplorerVisibilityStore::new(settings.clone()),
             ai_settings: AiSettingsStore::new(settings),
@@ -111,9 +110,15 @@ impl UseCases {
         self.drivers.dialects()
     }
 
-    /// Sets where exports are written and their row cap.
+    /// Sets the export row cap.
     pub fn with_export(mut self, export: ExportOptions) -> Self {
         self.export = export;
+        self
+    }
+
+    /// Sets the configured export destinations.
+    pub fn with_destinations(mut self, destinations: Arc<DestinationRegistry>) -> Self {
+        self.destinations = destinations;
         self
     }
 

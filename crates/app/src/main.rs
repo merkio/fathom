@@ -3,13 +3,14 @@
 // A GUI program: no console window on Windows release builds.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod config;
 mod logging;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
-use application::ports::{SecretStore, SystemClock};
+use application::ports::{DestinationFactory, SecretStore, SystemClock};
 use application::registry::{DriverRegistry, LlmRegistry};
 use application::usecases::{ExecuteOptions, ExportOptions, Ports, UseCases};
 use domain::SecretRef;
@@ -100,6 +101,53 @@ fn export_dir(data_dir: &std::path::Path) -> PathBuf {
         .unwrap_or_else(|| data_dir.join("exports"))
 }
 
+/// Export adapters: one line each. Which of them may be used is decided by `enabled` in the
+/// configuration file, not here.
+fn export_factories() -> Vec<Box<dyn DestinationFactory>> {
+    vec![
+        Box::new(export_local::FolderFactory::local()),
+        Box::new(export_local::FolderFactory::smb()),
+        Box::new(export_local::FolderFactory::nfs()),
+        Box::new(export_s3::S3Factory),
+    ]
+}
+
+/// Reads `fathom.toml` (or the file named by `FATHOM_CONFIG`). A missing file is normal; a broken
+/// one is reported and ignored, so the application always starts.
+fn load_config(data: &std::path::Path) -> config::Config {
+    let path = std::env::var_os("FATHOM_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data.join("fathom.toml"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return config::Config {
+            enabled: vec!["local".into()],
+            ..config::Config::default()
+        };
+    };
+    let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
+    let env = |name: &str| std::env::var(name).ok();
+    let read_file = |p: &str| std::fs::read_to_string(p).ok();
+    match config::parse(&text, &env, &read_file, home.as_deref()) {
+        Ok(config) => {
+            tracing::info!(
+                file = %path.display(),
+                destinations = config.destinations.len(),
+                problems = config.problems.len(),
+                "configuration loaded"
+            );
+            config
+        }
+        Err(message) => {
+            tracing::warn!(file = %path.display(), error = %message, "configuration ignored");
+            config::Config {
+                enabled: vec!["local".into()],
+                problems: vec![format!("{}: {message}", path.display())],
+                ..config::Config::default()
+            }
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let data = data_dir()?;
     logging::init(&data);
@@ -112,6 +160,7 @@ fn main() -> anyhow::Result<()> {
     drivers.register(Arc::new(db_sqlite::SqliteDriver::new()));
     drivers.register(Arc::new(db_clickhouse::ClickHouseDriver::new()));
 
+    let config = load_config(&data);
     let secrets = secret_store();
     let llm = llm_providers(secrets.clone())?;
 
@@ -128,9 +177,15 @@ fn main() -> anyhow::Result<()> {
         ExecuteOptions::default(),
     )
     .with_export(ExportOptions {
-        directory: export_dir(&data),
-        ..ExportOptions::default()
-    });
+        max_rows: config
+            .max_export_rows
+            .unwrap_or(application::usecases::DEFAULT_MAX_EXPORT_ROWS),
+    })
+    .with_destinations(Arc::new(config::build_registry(
+        &config,
+        &export_factories(),
+        &export_dir(&data),
+    )));
 
     ui_egui::run(Arc::new(use_cases)).map_err(|e| anyhow!("{e}"))
 }

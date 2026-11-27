@@ -7,6 +7,8 @@ members = [
     "crates/db-sqlite",
     "crates/db-mysql",
     "crates/db-clickhouse",
+    "crates/export-local",
+    "crates/export-s3",
     "crates/llm-anthropic",
     "crates/llm-openai",
     "crates/llm-ollama",

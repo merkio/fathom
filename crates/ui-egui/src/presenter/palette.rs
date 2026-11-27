@@ -21,6 +21,8 @@ pub enum PaletteAction {
     Theme(ThemePreference),
     NewQuery,
     ManageInstances,
+    ExportResults,
+    StorageConnections,
     OpenTable {
         session: SessionId,
         schema: String,
@@ -160,6 +162,22 @@ impl Presenter {
                 None,
             ),
             item(
+                PaletteAction::ExportResults,
+                "Workspace",
+                "Export results...",
+                "Save the results as a file in an export destination",
+                Some("Ctrl+Shift+E"),
+                None,
+            ),
+            item(
+                PaletteAction::StorageConnections,
+                "Workspace",
+                "Storage connections",
+                "Where exports can be written",
+                None,
+                None,
+            ),
+            item(
                 PaletteAction::Theme(ThemePreference::Light),
                 "Appearance",
                 "Theme: light",
@@ -255,6 +273,8 @@ impl Presenter {
             PaletteAction::ToggleSidePanel => self.toggle_side_panel(),
             PaletteAction::Theme(theme) => self.set_theme(theme),
             PaletteAction::ManageInstances => self.open_instances(None),
+            PaletteAction::ExportResults => self.open_export_dialog(),
+            PaletteAction::StorageConnections => self.open_storage_dialog(),
             PaletteAction::NewQuery => {
                 let session = self
                     .selected_tab()

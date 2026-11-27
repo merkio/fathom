@@ -20,7 +20,9 @@ pub use connections::{
 };
 pub use data::{ApplyChanges, BrowseSchema, ExecuteOptions, ExecuteQuery, QueryHistory};
 pub use explorer::ExplorerVisibilityStore;
-pub use export::{DEFAULT_MAX_EXPORT_ROWS, ExportResult, ExportSummary};
+pub use export::{
+    DEFAULT_MAX_EXPORT_ROWS, Delivered, ExportResult, ExportSummary, deliver, export_key,
+};
 pub use inline::{
     InlineCompletion, InlineRequest, InlineSettings, InlineSettingsStore, SuggestInline,
 };

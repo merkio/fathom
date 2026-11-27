@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use domain::{DriverKind, ProviderId, SecretRef};
 
-use crate::ports::{DatabaseDriver, LlmProvider};
+use crate::ports::{DatabaseDriver, ExportDestination, LlmProvider};
 
 #[derive(Default)]
 pub struct DriverRegistry {
@@ -73,4 +73,65 @@ impl LlmRegistry {
     pub fn ids(&self) -> Vec<ProviderId> {
         self.providers.keys().cloned().collect()
     }
+}
+
+/// A configured export destination.
+pub struct RegisteredDestination {
+    pub name: String,
+    pub destination: Arc<dyn ExportDestination>,
+}
+
+/// The destinations the user configured, in configuration order.
+#[derive(Default)]
+pub struct DestinationRegistry {
+    items: Vec<RegisteredDestination>,
+    problems: Vec<String>,
+}
+
+impl DestinationRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a destination; a later one with the same name replaces the earlier.
+    pub fn register(&mut self, name: impl Into<String>, destination: Arc<dyn ExportDestination>) {
+        let name = name.into();
+        self.items.retain(|i| i.name != name);
+        self.items.push(RegisteredDestination { name, destination });
+    }
+
+    /// Notes something wrong with the configuration (shown to the user, never fatal).
+    pub fn report_problem(&mut self, problem: impl Into<String>) {
+        self.problems.push(problem.into());
+    }
+
+    pub fn problems(&self) -> &[String] {
+        &self.problems
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<dyn ExportDestination>> {
+        self.items
+            .iter()
+            .find(|i| i.name == name)
+            .map(|i| Arc::clone(&i.destination))
+    }
+
+    /// Name, kind and where files land, for each destination.
+    pub fn list(&self) -> Vec<DestinationInfo> {
+        self.items
+            .iter()
+            .map(|i| DestinationInfo {
+                name: i.name.clone(),
+                kind: i.destination.kind().to_owned(),
+                location: i.destination.describe(),
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestinationInfo {
+    pub name: String,
+    pub kind: String,
+    pub location: String,
 }

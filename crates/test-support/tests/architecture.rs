@@ -47,7 +47,9 @@ fn role_of(name: &str) -> Option<Role> {
         "ui-egui" => Some(Role::Ui),
         "app" => Some(Role::App),
         "test-support" => Some(Role::TestSupport),
-        n if n.starts_with("db-") || n.starts_with("llm-") => Some(Role::Adapter),
+        n if n.starts_with("db-") || n.starts_with("llm-") || n.starts_with("export-") => {
+            Some(Role::Adapter)
+        }
         _ => None,
     }
 }
@@ -241,6 +243,10 @@ fn valid_graph() -> Vec<Package> {
             ],
         ),
         pkg(
+            "export-local",
+            &[("application", Normal), ("tokio", Normal)],
+        ),
+        pkg(
             "llm-ollama",
             &[("application", Normal), ("reqwest", Normal)],
         ),
@@ -329,6 +335,24 @@ fn drivers_and_ui_in_application_are_rejected() {
 fn adapters_must_not_depend_on_each_other() {
     let v = check(&with_extra_dep("db-mysql", "db-postgres", Kind::Normal));
     assert_eq!(v.len(), 1, "{v:?}");
+}
+
+#[test]
+fn export_adapters_follow_the_adapter_rules() {
+    assert_eq!(
+        check(&with_extra_dep("export-local", "db-postgres", Kind::Normal)).len(),
+        1,
+        "adapters must not depend on each other"
+    );
+    assert_eq!(
+        check(&with_extra_dep("export-local", "egui", Kind::Normal)).len(),
+        1
+    );
+    assert_eq!(
+        check(&with_extra_dep("ui-egui", "export-local", Kind::Normal)).len(),
+        1,
+        "the UI never imports an adapter"
+    );
 }
 
 #[test]

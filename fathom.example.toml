@@ -1,0 +1,93 @@
+# Fathom configuration example.
+#
+# Copy this file to `fathom.toml` in Fathom's data directory (or point FATHOM_CONFIG at it) and
+# edit it. The data directory is:
+#   Linux    ~/.local/share/fathom
+#   macOS    ~/Library/Application Support/fathom
+#   Windows  %APPDATA%\fathom\data
+# (or whatever FATHOM_DATA_DIR says). Fathom runs without this file: exports then go to a
+# "Local exports" folder in your documents directory.
+#
+# Everything here is about EXPORT DESTINATIONS (where "Export..." can write files). Database
+# connections and LLM providers are set up inside the app.
+
+[export]
+# Which kinds of destination may be used. A destination whose kind is not listed here is
+# ignored (and the Storage connections dialog says why). Default: ["local"].
+#   local  a folder on this machine
+#   s3     Amazon S3 and S3-compatible storage (MinIO, Cloudflare R2, Ceph, ...)
+#   smb    a Windows/Samba share that your operating system has mounted
+#   nfs    an NFS export that your operating system has mounted
+enabled = ["local", "s3", "smb", "nfs"]
+
+# The most rows one export may hold (the query is run again for an export, so it can hold more
+# rows than the grid shows). Default: 100000. Results are held in memory.
+max_rows = 100000
+
+# ------------------------------------------------------------------------------------------
+# Every destination below appears in the Export dialog and the Storage connections dialog.
+# `name` is what you see; `kind` selects the adapter. Existing files are NEVER overwritten.
+#
+# Any value can be written three ways:
+#   key = "literal"               the value itself
+#   key = { env = "VAR_NAME" }    read from an environment variable
+#   key = { file = "/path" }      read from a file (for example a Docker/Kubernetes secret)
+# Prefer env or file for anything secret, so the file itself holds no credentials. Keys named
+# access_key_id, secret_access_key, session_token, password and token are treated as secrets:
+# they are never logged and never shown in the app.
+# ------------------------------------------------------------------------------------------
+
+# --- A folder on this machine ---------------------------------------------------------------
+[[export.destination]]
+name = "Local exports"
+kind = "local"
+path = "~/fathom-exports"          # `~` is your home directory; the folder is created if needed
+
+# --- Amazon S3 ------------------------------------------------------------------------------
+# Credentials are looked up in this order:
+#   1. access_key_id / secret_access_key (below), if you set them
+#   2. the standard AWS chain: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN
+#      environment variables, the shared files ~/.aws/credentials and ~/.aws/config (select a
+#      named profile with `profile`), AWS SSO (`aws sso login`), or an instance/task role.
+# The IAM user or role needs s3:PutObject on the bucket and s3:GetObject (used to check that a
+# file does not exist yet). "Test connection" also needs s3:DeleteObject to clean up.
+[[export.destination]]
+name = "Analytics archive"
+kind = "s3"
+bucket = "acme-analytics"          # just the bucket name, no s3:// and no slashes
+region = "us-east-1"
+prefix = "exports/"                # put in front of every file (a folder inside the bucket)
+profile = "analytics-prod"         # optional: a profile from ~/.aws/config
+# Optional explicit credentials. Remove these two lines to use the AWS chain above.
+# access_key_id     = { env = "ANALYTICS_AWS_KEY_ID" }
+# secret_access_key = { env = "ANALYTICS_AWS_SECRET" }
+# session_token     = { env = "ANALYTICS_AWS_SESSION_TOKEN" }   # only for temporary credentials
+
+# --- S3-compatible storage (MinIO, Cloudflare R2, Ceph, ...) ---------------------------------
+# [[export.destination]]
+# name = "MinIO"
+# kind = "s3"
+# bucket = "exports"
+# endpoint = "https://minio.internal:9000"   # setting an endpoint turns on path-style addressing
+# region = "us-east-1"                       # most services accept any value
+# access_key_id     = { env = "MINIO_ACCESS_KEY" }
+# secret_access_key = { env = "MINIO_SECRET_KEY" }
+
+# --- SMB (Windows / Samba share) ------------------------------------------------------------
+# Fathom does not speak SMB itself: mount the share with your operating system and point
+# `path` at the mount point. Fathom checks the mount exists before writing, so an unmounted
+# share is an error, never a stray local folder.
+#   Linux    sudo mount -t cifs //nas.internal/analytics /mnt/team -o credentials=/etc/smb-creds,uid=$(id -u)
+#   macOS    Finder > Go > Connect to Server...  (smb://nas.internal/analytics)  ->  /Volumes/analytics
+#   Windows  map a network drive (for example Z:)  or use a UNC path: \\nas.internal\analytics
+# [[export.destination]]
+# name = "Team share"
+# kind = "smb"
+# path = "/mnt/team"
+
+# --- NFS ------------------------------------------------------------------------------------
+#   Linux/macOS  sudo mount -t nfs nfs.internal:/srv/exports /mnt/nfs
+# [[export.destination]]
+# name = "Build archive"
+# kind = "nfs"
+# path = "/mnt/nfs"

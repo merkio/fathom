@@ -1,8 +1,6 @@
 use eframe::egui::{self, Frame, Margin, RichText, Sense, Stroke};
 use egui_extras::{Column, TableBuilder};
 
-use application::export::ExportFormat;
-
 use crate::presenter::{NULL_TEXT, Presenter, ReviewKind, TabState};
 use crate::theme;
 
@@ -427,44 +425,22 @@ pub fn review_dialog(ctx: &egui::Context, p: &mut Presenter) {
     }
 }
 
-/// Export controls above the grid: format, file name and the button. Shown only for a result
-/// with columns. The export re-runs the statement, so it can hold more rows than the grid.
+/// The Export button above the grid. The dialog it opens holds all the choices.
 pub fn export_controls(ui: &mut egui::Ui, p: &mut Presenter) {
-    let exportable = p
-        .selected_tab()
-        .is_some_and(|t| matches!(&t.state, TabState::Done(r) if !r.columns.is_empty()));
-    if !exportable {
+    if !p.can_export() {
         return;
     }
-    let mut export = false;
     ui.horizontal(|ui| {
-        ui.label("Export");
-        egui::ComboBox::from_id_salt("export_format")
-            .width(70.0)
-            .selected_text(match p.export.format {
-                ExportFormat::Csv => "CSV",
-                ExportFormat::Json => "JSON",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut p.export.format, ExportFormat::Csv, "CSV");
-                ui.selectable_value(&mut p.export.format, ExportFormat::Json, "JSON");
-            });
-        ui.add(
-            egui::TextEdit::singleline(&mut p.export.name)
-                .hint_text("file name (optional)")
-                .desired_width(170.0),
-        );
-        export = ui
-            .add_enabled(!p.export.running, egui::Button::new("Save"))
-            .on_hover_text(
-                "Re-runs the query and writes a new file. Existing files are never overwritten.",
-            )
-            .clicked();
+        if ui
+            .add_enabled(!p.export.running, egui::Button::new("Export..."))
+            .on_hover_text("Save the results as a new file in one of your export destinations")
+            .clicked()
+        {
+            p.open_export_dialog();
+        }
         if p.export.running {
             ui.spinner();
+            ui.label("Exporting...");
         }
     });
-    if export {
-        p.export_selected();
-    }
 }

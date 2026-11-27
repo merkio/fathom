@@ -5,7 +5,6 @@ pub mod ai;
 pub mod app;
 pub mod backend;
 pub mod bridge;
-pub mod export;
 pub mod form;
 pub mod inline;
 pub mod presenter;
@@ -14,5 +13,5 @@ mod views;
 
 pub use app::{FathomApp, run};
 pub use backend::Backend;
-pub use bridge::{AiAsk, AiId, AiTask, Command, Event, ExportDone, SessionId, TabId};
+pub use bridge::{AiAsk, AiId, AiTask, Command, Event, ExportDone, ExportSource, SessionId, TabId};
 pub use presenter::Presenter;

@@ -13,15 +13,17 @@ use domain::{
 };
 
 use crate::ai::{AiMode, AiRun, AiRunState, AiState, Followup};
-use application::export::ExportFormat;
+use application::registry::DestinationInfo;
 
 use crate::bridge::{AiAsk, AiTask, Command, Event, SessionId, TabId};
 use crate::form::ConnectionForm;
 use crate::inline::{Ghost, InlineState, Snapshot};
 
+mod export;
 mod grid;
 mod instances;
 mod palette;
+pub use export::{ExportUi, TestState};
 pub use grid::{GridState, NULL_TEXT, ReviewKind, ReviewLine};
 pub use instances::{DatabaseRow, InstanceTab, InstancesState};
 pub use palette::{PaletteAction, PaletteItem, PaletteState};
@@ -85,15 +87,6 @@ pub struct QueryTab {
     pub grid: GridState,
 }
 
-/// Export controls under the result grid.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExportUi {
-    pub format: ExportFormat,
-    /// File name typed by the user (empty: a default name).
-    pub name: String,
-    pub running: bool,
-}
-
 /// Which panel is shown on the right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightPanel {
@@ -120,6 +113,13 @@ pub struct Presenter {
     pub ai: AiState,
     pub inline: InlineState,
     pub export: ExportUi,
+    /// The configured export destinations (from the configuration file).
+    pub destinations: Vec<DestinationInfo>,
+    /// Things wrong with the export configuration, for the Storage connections dialog.
+    pub destination_problems: Vec<String>,
+    pub destination_tests: std::collections::HashMap<String, TestState>,
+    /// The Storage connections dialog, when open (the selected destination's name).
+    pub storage_dialog: Option<Option<String>>,
     /// Theme and panel visibility (saved; loaded at start-up).
     pub prefs: UiPrefs,
     /// The command palette, when open.
@@ -141,6 +141,13 @@ pub struct Presenter {
     outbox: Vec<Command>,
 }
 
+impl QueryTab {
+    /// The statement this tab last ran.
+    pub fn executed_text(&self) -> &str {
+        &self.executed
+    }
+}
+
 impl Presenter {
     pub fn new(
         dialects: Vec<(DriverKind, Dialect)>,
@@ -158,6 +165,7 @@ impl Presenter {
                 .map(|(id, _)| Command::LoadApiKeyStatus(id.clone())),
         );
         outbox.push(Command::LoadUiPrefs);
+        outbox.push(Command::LoadDestinations);
         Self {
             connections: Vec::new(),
             connecting: HashSet::new(),
@@ -172,11 +180,11 @@ impl Presenter {
             right_panel: RightPanel::History,
             ai: AiState::new(llm_providers),
             inline: InlineState::new(),
-            export: ExportUi {
-                format: ExportFormat::Csv,
-                name: String::new(),
-                running: false,
-            },
+            export: ExportUi::default(),
+            destinations: Vec::new(),
+            destination_problems: Vec::new(),
+            destination_tests: std::collections::HashMap::new(),
+            storage_dialog: None,
             prefs: UiPrefs::default(),
             palette: None,
             instances: None,
@@ -626,38 +634,6 @@ impl Presenter {
         &self.ai.settings
     }
 
-    // --- export ---------------------------------------------------------------------------
-
-    /// Exports the statement the selected tab last ran (not the possibly edited editor text), up
-    /// to the export row cap, to a new file.
-    pub fn export_selected(&mut self) {
-        if self.export.running {
-            return;
-        }
-        let Some(id) = self.selected else { return };
-        let Some(connection) = self.tab_connection(id) else {
-            return;
-        };
-        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
-            return;
-        };
-        if !matches!(tab.state, TabState::Done(_)) || tab.executed.trim().is_empty() {
-            self.status = Some(Status::Error(
-                "Run a query first; the export re-runs it.".into(),
-            ));
-            return;
-        }
-        self.export.running = true;
-        self.outbox.push(Command::Export {
-            tab: id,
-            session: tab.session,
-            connection,
-            text: tab.executed.clone(),
-            format: self.export.format,
-            name: self.export.name.clone(),
-        });
-    }
-
     // --- LLM inline suggestions ---------------------------------------------------------------
 
     /// Whether inline suggestions are on for this connection: its own override if it has one,
@@ -917,23 +893,16 @@ impl Presenter {
 
     pub fn handle(&mut self, event: Event) {
         match event {
-            Event::Exported { result, .. } => {
-                self.export.running = false;
-                self.status = Some(match result {
-                    Ok(done) => {
-                        let more = if done.truncated {
-                            " (stopped at the row limit; more rows exist)"
-                        } else {
-                            ""
-                        };
-                        Status::Info(format!(
-                            "Exported {} row(s) to {}{more}",
-                            done.rows,
-                            done.path.display()
-                        ))
-                    }
-                    Err(message) => Status::Error(format!("Export failed: {message}")),
-                });
+            Event::Exported { result, .. } => self.on_exported(result),
+            Event::Destinations { items, problems } => self.on_destinations(items, problems),
+            Event::DestinationTested { name, result } => {
+                self.destination_tests.insert(
+                    name,
+                    match result {
+                        Ok(()) => TestState::Ok,
+                        Err(e) => TestState::Failed(e),
+                    },
+                );
             }
             Event::InlineText { id, completion } => {
                 self.inline
@@ -1139,7 +1108,8 @@ mod tests {
                 Command::LoadConnections,
                 Command::LoadAiSettings,
                 Command::LoadInlineSettings,
-                Command::LoadUiPrefs
+                Command::LoadUiPrefs,
+                Command::LoadDestinations
             ]
         ));
         p
@@ -1690,7 +1660,8 @@ mod tests {
         assert!(matches!(cmds[2], Command::LoadInlineSettings));
         assert!(matches!(&cmds[3], Command::LoadApiKeyStatus(id) if id.as_str() == "cloud"));
         assert!(matches!(cmds[4], Command::LoadUiPrefs));
-        assert_eq!(cmds.len(), 5);
+        assert!(matches!(cmds[5], Command::LoadDestinations));
+        assert_eq!(cmds.len(), 6);
     }
 
     #[test]
@@ -2453,7 +2424,8 @@ mod tests {
 
     // ---- export -----------------------------------------------------------------------
 
-    use crate::bridge::ExportDone;
+    use crate::bridge::{ExportDone, ExportSource};
+    use application::export::ExportFormat;
 
     fn ran(p: &mut Presenter, tab: TabId, sql: &str) {
         p.tab_mut(tab).expect("tab").text = sql.into();
@@ -2466,40 +2438,148 @@ mod tests {
         p.take_commands();
     }
 
-    #[test]
-    fn export_sends_the_statement_that_ran_not_the_edited_text() {
-        let (mut p, tab) = ai_ready();
-        ran(&mut p, tab, "select * from customers");
-        p.tab_mut(tab).expect("tab").text = "something else".into();
-        p.export.format = ExportFormat::Json;
-        p.export.name = "customers".into();
+    fn destinations() -> Vec<DestinationInfo> {
+        vec![
+            DestinationInfo {
+                name: "Local exports".into(),
+                kind: "local".into(),
+                location: "/data/exports".into(),
+            },
+            DestinationInfo {
+                name: "Analytics archive".into(),
+                kind: "s3".into(),
+                location: "s3://acme/exports/".into(),
+            },
+        ]
+    }
 
-        p.export_selected();
-        let cmds = p.take_commands();
+    /// A tab that ran `sql` (3 rows) with destinations loaded and the dialog's choices set.
+    fn export_ready(sql: &str) -> (Presenter, TabId) {
+        let (mut p, tab) = ai_ready();
+        p.handle(Event::Destinations {
+            items: destinations(),
+            problems: vec![],
+        });
+        ran(&mut p, tab, sql);
+        (p, tab)
+    }
+
+    #[test]
+    fn startup_asks_for_the_configured_destinations() {
+        let mut p = Presenter::new(vec![], vec![]);
         assert!(
-            matches!(&cmds[..], [Command::Export { text, format, name, .. }]
-            if text == "select * from customers" && *format == ExportFormat::Json && name == "customers"),
-            "{cmds:?}"
+            p.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::LoadDestinations))
         );
+    }
+
+    #[test]
+    fn the_dialog_needs_a_result_and_picks_the_first_destination() {
+        let (mut p, _) = ai_ready();
+        p.open_export_dialog();
+        assert!(!p.export.dialog_open, "nothing to export yet");
+        let (mut p, _) = export_ready("select * from customers");
+        p.open_export_dialog();
+        assert!(p.export.dialog_open);
+        assert_eq!(p.export.destination.as_deref(), Some("Local exports"));
+        p.choose_destination("Analytics archive");
+        p.choose_destination("not configured");
+        assert_eq!(p.export.destination.as_deref(), Some("Analytics archive"));
+    }
+
+    #[test]
+    fn export_sends_the_statement_that_ran_to_the_chosen_destination() {
+        let (mut p, tab) = export_ready("select * from customers");
+        p.tab_mut(tab).expect("tab").text = "something else".into();
+        p.export.format = ExportFormat::Sql;
+        p.export.name = "customers".into();
+        p.export.folder = "exports/today".into();
+        p.open_export_dialog();
+        p.choose_destination("Analytics archive");
+
+        p.start_export();
+        let cmds = p.take_commands();
+        let [
+            Command::Export {
+                source,
+                destination,
+                folder,
+                name,
+                format,
+                ..
+            },
+        ] = &cmds[..]
+        else {
+            panic!("{cmds:?}")
+        };
+        assert_eq!(
+            source,
+            &ExportSource::Query("select * from customers".into())
+        );
+        assert_eq!(destination, "Analytics archive");
+        assert_eq!(
+            (folder.as_str(), name.as_str()),
+            ("exports/today", "customers")
+        );
+        assert_eq!(*format, ExportFormat::Sql);
         assert!(p.export.running);
     }
 
     #[test]
-    fn export_needs_a_finished_query_and_ignores_double_clicks() {
+    fn selected_rows_export_exactly_those_rows_without_running_the_query_again() {
+        let (mut p, tab) = export_ready("select * from customers");
+        p.open_export_dialog();
+        p.tab_mut(tab).expect("tab").grid.selected.insert(1);
+        assert_eq!(p.selected_row_count(), 1);
+        p.export.selected_only = true;
+        p.start_export();
+        let cmds = p.take_commands();
+        let [
+            Command::Export {
+                source: ExportSource::Rows(r),
+                ..
+            },
+        ] = &cmds[..]
+        else {
+            panic!("{cmds:?}")
+        };
+        assert_eq!(r.rows.len(), 1);
+        assert!(!r.truncated);
+    }
+
+    #[test]
+    fn asking_for_selected_rows_with_none_ticked_sends_nothing() {
+        let (mut p, _) = export_ready("select 1");
+        p.open_export_dialog();
+        p.export.selected_only = true;
+        p.start_export();
+        assert!(p.take_commands().is_empty());
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("No rows")));
+    }
+
+    #[test]
+    fn exporting_needs_a_destination_and_ignores_double_clicks() {
         let (mut p, tab) = ai_ready();
-        p.export_selected();
-        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("Run a query first")));
+        ran(&mut p, tab, "select 1");
+        p.start_export();
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("Choose a destination")));
         assert!(p.take_commands().is_empty());
 
-        ran(&mut p, tab, "select 1");
-        p.export_selected();
-        p.export_selected();
+        let (mut p, _) = export_ready("select 1");
+        p.open_export_dialog();
+        p.start_export();
+        p.start_export();
         assert_eq!(p.take_commands().len(), 1, "one export at a time");
     }
 
     #[test]
     fn a_failed_query_cannot_be_exported() {
         let (mut p, tab) = ai_ready();
+        p.handle(Event::Destinations {
+            items: destinations(),
+            problems: vec![],
+        });
         p.tab_mut(tab).expect("tab").text = "bad".into();
         p.run(tab);
         p.take_commands();
@@ -2507,47 +2587,90 @@ mod tests {
             tab,
             result: Err("syntax".into()),
         });
-        p.take_commands(); // the history reload
-        p.export_selected();
+        p.take_commands();
+        p.open_export_dialog();
+        assert!(!p.export.dialog_open);
+        p.start_export();
         assert!(p.take_commands().is_empty());
     }
 
     #[test]
-    fn export_results_are_reported_in_the_status_bar() {
-        let (mut p, tab) = ai_ready();
-        ran(&mut p, tab, "select 1");
-        p.export_selected();
+    fn export_results_are_reported_and_the_dialog_closes_only_on_success() {
+        let (mut p, tab) = export_ready("select 1");
+        p.open_export_dialog();
+        p.export.name = "x".into();
+        p.start_export();
         p.take_commands();
-        p.handle(Event::Exported {
-            tab,
-            result: Ok(ExportDone {
-                path: "/tmp/out.csv".into(),
-                rows: 42,
-                truncated: false,
-            }),
-        });
-        assert!(!p.export.running);
-        assert!(
-            matches!(&p.status, Some(Status::Info(m)) if m.contains("42 row(s)") && m.contains("/tmp/out.csv") && !m.contains("limit"))
-        );
-
-        p.handle(Event::Exported {
-            tab,
-            result: Ok(ExportDone {
-                path: "/tmp/big.csv".into(),
-                rows: 100_000,
-                truncated: true,
-            }),
-        });
-        assert!(matches!(&p.status, Some(Status::Info(m)) if m.contains("more rows exist")));
-
-        p.export.running = true;
         p.handle(Event::Exported {
             tab,
             result: Err("`x.csv` already exists".into()),
         });
         assert!(!p.export.running, "a failure frees the button");
+        assert!(p.export.dialog_open, "the name can be fixed and retried");
+        assert_eq!(p.export.name, "x", "a failure keeps what was typed");
         assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("already exists")));
+
+        p.start_export();
+        p.take_commands();
+        p.handle(Event::Exported {
+            tab,
+            result: Ok(ExportDone {
+                location: "s3://acme/exports/out.csv".into(),
+                rows: 42,
+                truncated: false,
+            }),
+        });
+        assert!(!p.export.dialog_open && !p.export.running);
+        assert!(p.export.name.is_empty(), "the next export needs a new name");
+        assert!(
+            matches!(&p.status, Some(Status::Info(m)) if m.contains("42 row(s)") && m.contains("s3://acme/exports/out.csv") && !m.contains("limit"))
+        );
+
+        p.handle(Event::Exported {
+            tab,
+            result: Ok(ExportDone {
+                location: "/tmp/big.csv".into(),
+                rows: 100_000,
+                truncated: true,
+            }),
+        });
+        assert!(matches!(&p.status, Some(Status::Info(m)) if m.contains("more rows exist")));
+    }
+
+    #[test]
+    fn a_destination_that_disappears_is_dropped_from_the_choice() {
+        let (mut p, _) = export_ready("select 1");
+        p.open_export_dialog();
+        p.choose_destination("Analytics archive");
+        p.handle(Event::Destinations {
+            items: destinations()[..1].to_vec(),
+            problems: vec!["bad entry".into()],
+        });
+        assert_eq!(p.export.destination, None);
+        assert_eq!(p.destination_problems, ["bad entry"]);
+    }
+
+    #[test]
+    fn testing_a_destination_tracks_its_state_and_ignores_repeats() {
+        let (mut p, _) = export_ready("select 1");
+        p.take_commands();
+        p.open_storage_dialog();
+        assert_eq!(p.storage_dialog, Some(Some("Local exports".into())));
+        p.select_storage("Analytics archive");
+        p.test_destination("Analytics archive");
+        p.test_destination("Analytics archive");
+        assert_eq!(p.take_commands().len(), 1);
+        assert_eq!(p.destination_tests["Analytics archive"], TestState::Testing);
+        p.handle(Event::DestinationTested {
+            name: "Analytics archive".into(),
+            result: Err("access denied".into()),
+        });
+        assert_eq!(
+            p.destination_tests["Analytics archive"],
+            TestState::Failed("access denied".into())
+        );
+        p.test_destination("unknown");
+        assert!(p.take_commands().is_empty());
     }
 
     // ---- command palette ---------------------------------------------------------------------
