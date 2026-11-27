@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use application::ports::HistoryEntry;
 use application::sql::{CompletionRequest, Suggestion, changes_schema};
-use application::usecases::{AiSettings, CompleteSql, InlineSettings};
+use application::usecases::{AiSettings, CompleteSql, InlineSettings, ThemePreference, UiPrefs};
 use domain::{
     ConnectionId, ConnectionProfile, Dialect, DriverKind, ModelId, ProviderId, QueryResult,
     SchemaTree,
@@ -111,6 +111,12 @@ pub struct Presenter {
     pub ai: AiState,
     pub inline: InlineState,
     pub export: ExportUi,
+    /// Theme and panel visibility (saved; loaded at start-up).
+    pub prefs: UiPrefs,
+    /// Text in the explorer's "Find an object" box (filters tables by name).
+    pub explorer_filter: String,
+    /// Where the editor cursor was last drawn (tab, byte offset), for the status bar.
+    last_cursor: Option<(TabId, usize)>,
     dialects: Vec<(DriverKind, Dialect)>,
     next_tab: u64,
     outbox: Vec<Command>,
@@ -132,6 +138,7 @@ impl Presenter {
                 .filter(|(_, needs_key)| *needs_key)
                 .map(|(id, _)| Command::LoadApiKeyStatus(id.clone())),
         );
+        outbox.push(Command::LoadUiPrefs);
         Self {
             connections: Vec::new(),
             connecting: HashSet::new(),
@@ -151,6 +158,9 @@ impl Presenter {
                 name: String::new(),
                 running: false,
             },
+            prefs: UiPrefs::default(),
+            explorer_filter: String::new(),
+            last_cursor: None,
             dialects,
             next_tab: 1,
             outbox,
@@ -682,6 +692,45 @@ impl Presenter {
         Some(cursor + ghost.text.len())
     }
 
+    /// Records the editor cursor of `tab` (called by the editor view every frame).
+    pub fn note_cursor(&mut self, tab: TabId, byte: usize) {
+        self.last_cursor = Some((tab, byte));
+    }
+
+    /// The last known cursor of `tab` (start of the text when unknown).
+    pub fn cursor_of(&self, tab: TabId) -> usize {
+        self.last_cursor
+            .filter(|(t, _)| *t == tab)
+            .map_or(0, |(_, c)| c)
+    }
+
+    /// Changes the theme and saves it.
+    pub fn set_theme(&mut self, theme: ThemePreference) {
+        if self.prefs.theme != theme {
+            self.prefs.theme = theme;
+            self.save_prefs();
+        }
+    }
+
+    pub fn toggle_explorer(&mut self) {
+        self.prefs.explorer = !self.prefs.explorer;
+        self.save_prefs();
+    }
+
+    pub fn toggle_results(&mut self) {
+        self.prefs.results = !self.prefs.results;
+        self.save_prefs();
+    }
+
+    pub fn toggle_side_panel(&mut self) {
+        self.prefs.side_panel = !self.prefs.side_panel;
+        self.save_prefs();
+    }
+
+    fn save_prefs(&mut self) {
+        self.outbox.push(Command::SaveUiPrefs(self.prefs));
+    }
+
     fn save_inline_settings(&mut self) {
         self.outbox
             .push(Command::SaveInlineSettings(self.inline.settings.clone()));
@@ -860,6 +909,8 @@ impl Presenter {
             Event::InlineSettings(Err(e)) => {
                 self.error(format!("Could not load inline settings: {e}"))
             }
+            Event::UiPrefs(Ok(prefs)) => self.prefs = prefs,
+            Event::UiPrefs(Err(e)) => self.error(format!("Could not load layout settings: {e}")),
             Event::Notice(Ok(message)) => self.status = Some(Status::Info(message)),
             Event::Notice(Err(message)) => self.error(message),
             e @ (Event::AiText { .. }
@@ -1020,7 +1071,8 @@ mod tests {
             [
                 Command::LoadConnections,
                 Command::LoadAiSettings,
-                Command::LoadInlineSettings
+                Command::LoadInlineSettings,
+                Command::LoadUiPrefs
             ]
         ));
         p
@@ -1570,7 +1622,52 @@ mod tests {
         );
         assert!(matches!(cmds[2], Command::LoadInlineSettings));
         assert!(matches!(&cmds[3], Command::LoadApiKeyStatus(id) if id.as_str() == "cloud"));
-        assert_eq!(cmds.len(), 4);
+        assert!(matches!(cmds[4], Command::LoadUiPrefs));
+        assert_eq!(cmds.len(), 5);
+    }
+
+    #[test]
+    fn changing_the_theme_saves_it_once_and_ignores_no_ops() {
+        let mut p = presenter();
+        p.set_theme(ThemePreference::System); // already the default
+        assert!(p.take_commands().is_empty());
+        p.set_theme(ThemePreference::Dark);
+        assert!(matches!(
+            p.take_commands().as_slice(),
+            [Command::SaveUiPrefs(prefs)] if prefs.theme == ThemePreference::Dark
+        ));
+    }
+
+    #[test]
+    fn panel_toggles_flip_and_save_the_whole_layout() {
+        let mut p = presenter();
+        assert!(p.prefs.explorer && p.prefs.results && p.prefs.side_panel);
+        p.toggle_explorer();
+        p.toggle_results();
+        p.toggle_side_panel();
+        let cmds = p.take_commands();
+        assert_eq!(cmds.len(), 3);
+        assert!(matches!(
+            cmds.last(),
+            Some(Command::SaveUiPrefs(prefs))
+                if !prefs.explorer && !prefs.results && !prefs.side_panel
+        ));
+    }
+
+    #[test]
+    fn loaded_layout_replaces_the_defaults_and_errors_are_reported() {
+        let mut p = presenter();
+        let saved = UiPrefs {
+            theme: ThemePreference::Light,
+            explorer: false,
+            results: true,
+            side_panel: false,
+        };
+        p.handle(Event::UiPrefs(Ok(saved)));
+        assert_eq!(p.prefs, saved);
+        p.handle(Event::UiPrefs(Err("disk full".into())));
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("disk full")));
+        assert_eq!(p.prefs, saved, "an error keeps what was loaded");
     }
 
     #[test]

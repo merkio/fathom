@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use crate::presenter::Presenter;
+use crate::theme;
 
 enum Action {
     Connect(domain::ConnectionId),
@@ -9,11 +10,14 @@ enum Action {
 }
 
 pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
+    let pal = *theme::palette(ui);
     ui.horizontal(|ui| {
-        ui.heading("Connections");
-        if ui.button("+ New").clicked() {
-            p.new_connection_form();
-        }
+        theme::section_label(ui, "Instances");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("+ New").clicked() {
+                p.new_connection_form();
+            }
+        });
     });
 
     let mut action = None;
@@ -22,38 +26,48 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
         .max_height(220.0)
         .show(ui, |ui| {
             if p.connections.is_empty() {
-                ui.weak("No saved connections");
+                ui.label(egui::RichText::new("No saved connections").color(pal.text_muted));
             }
             for c in &p.connections {
+                let connecting = p.connecting.contains(&c.id);
+                let is_open = p.open.iter().any(|o| o.connection == c.id);
+                let port = c
+                    .port
+                    .map_or_else(|| "default".to_owned(), |p| p.to_string());
+                let mut title = c.name.clone();
+                if c.read_only() {
+                    title.push_str(" (read-only)");
+                }
                 ui.horizontal(|ui| {
-                    let connecting = p.connecting.contains(&c.id);
-                    let label = if c.read_only() {
-                        format!("{} (read-only)", c.name)
-                    } else {
-                        c.name.clone()
-                    };
-                    ui.label(label).on_hover_text(format!(
-                        "{} {}:{}",
-                        c.driver_kind.as_str(),
-                        c.host,
-                        c.port
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "default".into())
-                    ));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Delete").clicked() {
-                            action = Some(Action::Delete(c.id));
-                        }
-                        if ui.small_button("Edit").clicked() {
-                            action = Some(Action::Edit(c.id));
-                        }
-                        if connecting {
-                            ui.spinner();
-                        } else if ui.small_button("Connect").clicked() {
-                            action = Some(Action::Connect(c.id));
-                        }
+                    let dot = if is_open { pal.success } else { pal.text_faint };
+                    ui.label(egui::RichText::new("\u{25CF}").color(dot).size(9.0));
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(title).strong());
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} \u{00B7} {}:{port}",
+                                c.driver_kind.as_str(),
+                                c.host
+                            ))
+                            .size(11.0)
+                            .color(pal.text_muted),
+                        );
+                        ui.horizontal(|ui| {
+                            if connecting {
+                                ui.spinner();
+                            } else if !is_open && ui.small_button("Connect").clicked() {
+                                action = Some(Action::Connect(c.id));
+                            }
+                            if ui.small_button("Edit").clicked() {
+                                action = Some(Action::Edit(c.id));
+                            }
+                            if ui.small_button("Delete").clicked() {
+                                action = Some(Action::Delete(c.id));
+                            }
+                        });
                     });
                 });
+                ui.add_space(4.0);
             }
         });
     match action {

@@ -194,6 +194,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter, tab: TabId, height: f32) {
         .map(|t| t.text.clone())
         .unwrap_or_default();
     let cursor = char_to_byte(&text, range.primary.index.0);
+    p.note_cursor(tab, cursor);
     let shown = p.popup(tab, cursor);
     if let Some(wake) = p.inline_tick(now, tab, cursor, true, !shown.is_empty()) {
         // egui only repaints on events; ask for a frame when the debounce timer is due.

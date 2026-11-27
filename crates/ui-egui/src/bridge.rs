@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use application::export::ExportFormat;
 use application::ports::{HistoryEntry, ModelInfo};
 use application::usecases::{
-    AiSettings, AssistReply, AssistTask, InlineCompletion, InlineSettings, PromptPreview,
+    AiSettings, AssistReply, AssistTask, InlineCompletion, InlineSettings, PromptPreview, UiPrefs,
 };
 use domain::{
     ChatMessage, ConnectionId, ConnectionProfile, Dialect, ModelId, ProviderId, QueryResult,
@@ -132,6 +132,8 @@ pub enum Command {
     InlineCancel(AiId),
     LoadInlineSettings,
     SaveInlineSettings(InlineSettings),
+    LoadUiPrefs,
+    SaveUiPrefs(UiPrefs),
     /// Re-runs `text` (up to the export row cap) and writes the result to a new file.
     Export {
         tab: TabId,
@@ -151,6 +153,7 @@ impl Command {
             self,
             Command::SaveAiSettings(_)
                 | Command::SaveInlineSettings(_)
+                | Command::SaveUiPrefs(_)
                 | Command::SaveApiKey { .. }
                 | Command::ClearApiKey(_)
         )
@@ -224,6 +227,7 @@ pub enum Event {
         error: Option<String>,
     },
     InlineSettings(Result<InlineSettings, String>),
+    UiPrefs(Result<UiPrefs, String>),
     Exported {
         tab: TabId,
         result: Result<ExportDone, String>,

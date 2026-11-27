@@ -9,6 +9,7 @@ pub mod export;
 pub mod form;
 pub mod inline;
 pub mod presenter;
+pub mod theme;
 mod views;
 
 pub use app::{FathomApp, run};
