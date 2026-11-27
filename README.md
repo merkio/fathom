@@ -208,7 +208,9 @@ mandatory, require them in the branch protection rules of `main`.
 ## Releasing
 
 1. Set the new version in `Cargo.toml` (`[workspace.package] version`) and merge it.
-2. Push a tag `vX.Y.Z` (for example `v0.2.0`; a suffix such as `-rc.1` makes a pre-release).
+2. Push a tag `vX.Y.Z` (for example `v0.2.0`; a suffix such as `-rc.1` makes a pre-release), **or**
+   open Actions > Release > *Run workflow* on `main` and type the tag: the workflow then creates
+   the tag on that commit itself (no local checkout needed).
 3. The `Release` workflow runs the full CI, checks that the tag equals the crate version, builds Linux
    (x86_64), macOS (Apple Silicon and Intel) and Windows (x86_64), and attaches the archives and
    `SHA256SUMS.txt` to a GitHub release with generated notes.

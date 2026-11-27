@@ -3,15 +3,26 @@ name: Release
 # Pushing a version tag (for example v0.1.0) runs the full CI, builds the desktop app for Linux,
 # macOS (Apple Silicon and Intel) and Windows, and attaches the archives plus checksums to a
 # GitHub release. The tag must match the workspace version in Cargo.toml.
+#
+# Without a local checkout, run this workflow by hand from the Actions tab on `main`
+# ("Run workflow", enter the tag): it then creates the tag on that commit itself.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to create, for example v0.1.0 (must match Cargo.toml)"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # The pushed tag, or the one typed into "Run workflow".
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   ci:
@@ -25,13 +36,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: A manual run must be on main and name a well-formed tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          [ "$GITHUB_REF" = "refs/heads/main" ] || {
+            echo "::error::Run this workflow on main (it was run on $GITHUB_REF)"; exit 1; }
+          echo "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || {
+            echo "::error::'$RELEASE_TAG' is not a version tag like v1.2.3 or v1.2.3-rc.1"; exit 1; }
       - name: Tag must equal the workspace version
         run: |
           VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c \
             "import sys, json; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name'] == 'app'))")
-          echo "Cargo version: $VERSION, tag: $GITHUB_REF_NAME"
-          [ "$GITHUB_REF_NAME" = "v$VERSION" ] || [ "${GITHUB_REF_NAME%%-*}" = "v$VERSION" ] || {
-            echo "::error::Tag $GITHUB_REF_NAME does not match version $VERSION in Cargo.toml"; exit 1; }
+          echo "Cargo version: $VERSION, tag: $RELEASE_TAG"
+          [ "$RELEASE_TAG" = "v$VERSION" ] || [ "${RELEASE_TAG%%-*}" = "v$VERSION" ] || {
+            echo "::error::Tag $RELEASE_TAG does not match version $VERSION in Cargo.toml"; exit 1; }
 
   build:
     name: Build ${{ matrix.name }}
@@ -73,7 +91,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          NAME="fathom-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          NAME="fathom-${RELEASE_TAG}-${{ matrix.name }}"
           mkdir "$NAME"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" LICENSE README.md "$NAME/"
           if [ "${{ matrix.archive }}" = "zip" ]; then
@@ -108,6 +126,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           PRERELEASE=""
-          case "$GITHUB_REF_NAME" in *-*) PRERELEASE="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag $PRERELEASE
+          case "$RELEASE_TAG" in *-*) PRERELEASE="--prerelease" ;; esac
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            # The tag already exists: it must be the one that was built.
+            WHERE="--verify-tag"
+          else
+            # Manual run: create the tag on the commit that was built and tested.
+            WHERE="--target $GITHUB_SHA"
+          fi
+          gh release create "$RELEASE_TAG" dist/* \
+            --title "$RELEASE_TAG" --generate-notes $WHERE $PRERELEASE
