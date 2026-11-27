@@ -10,6 +10,7 @@ mod history;
 mod instances;
 mod palette;
 mod results;
+mod saved;
 mod schema;
 mod storage;
 
@@ -45,6 +46,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
             .default_size(280.0)
             .min_size(220.0)
             .show(ui, |ui| {
+                Panel::bottom("saved_queries_panel")
+                    .frame(Frame::NONE)
+                    .show_separator_line(false)
+                    .show(ui, |ui| saved::sidebar(ui, p));
                 connections::show(ui, p);
                 ui.add_space(6.0);
                 schema::show(ui, p);
@@ -74,6 +79,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
     results::review_dialog(ui.ctx(), p);
     storage::show(ui.ctx(), p);
     export::show(ui.ctx(), p);
+    saved::save_dialog(ui.ctx(), p);
     instances::show(ui.ctx(), p);
     palette::show(ui.ctx(), p);
 }
@@ -81,12 +87,13 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
 /// Window-wide shortcuts. The palette owns the keyboard while it is open.
 fn shortcuts(ui: &egui::Ui, p: &mut Presenter) {
     let cmd = Modifiers::COMMAND;
-    let (mut open, mut focus, mut explorer, mut results, mut side, mut export) =
-        (false, false, false, false, false, false);
+    let (mut open, mut focus, mut explorer, mut results, mut side, mut export, mut save) =
+        (false, false, false, false, false, false, false);
     ui.input_mut(|i| {
         // The shifted shortcut first: `Cmd+F` must not swallow `Cmd+Shift+F`.
         focus = i.consume_shortcut(&KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::F));
         export = i.consume_shortcut(&KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::E));
+        save = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::S));
         open = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::K));
         explorer = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Num1));
         results = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Num2));
@@ -104,6 +111,9 @@ fn shortcuts(ui: &egui::Ui, p: &mut Presenter) {
     }
     if export {
         p.open_export_dialog();
+    }
+    if save {
+        p.save_current();
     }
     if explorer {
         p.toggle_explorer();

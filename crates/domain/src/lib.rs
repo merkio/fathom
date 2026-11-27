@@ -6,6 +6,7 @@ pub mod dialect;
 pub mod error;
 pub mod llm;
 pub mod query;
+pub mod saved_query;
 pub mod schema;
 
 pub use changes::{ApplyOutcome, RowChange, TableChanges};
@@ -14,6 +15,7 @@ pub use dialect::{Dialect, LimitStyle};
 pub use error::DomainError;
 pub use llm::{ChatMessage, ModelId, ProviderId, Role};
 pub use query::{QueryLanguage, QueryRequest, QueryResult, ResultColumn, Value};
+pub use saved_query::{SavedQuery, SavedQueryId};
 pub use schema::{
     Catalog, Column, DataType, ForeignKey, Index, Schema, SchemaTree, Table, TableKind,
 };

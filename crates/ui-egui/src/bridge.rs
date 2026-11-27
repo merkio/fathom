@@ -163,6 +163,13 @@ pub enum Command {
     },
     /// Lists the configured export destinations.
     LoadDestinations,
+    LoadSavedQueries,
+    /// Saves a query under a name (`id`: update that one; `None`: a new one).
+    SaveQuery {
+        tab: TabId,
+        draft: application::usecases::SaveDraft,
+    },
+    DeleteSavedQuery(domain::SavedQueryId),
     /// Checks that a destination can be written to.
     TestDestination(String),
 }
@@ -186,6 +193,8 @@ impl Command {
                 | Command::SaveInlineSettings(_)
                 | Command::SaveUiPrefs(_)
                 | Command::SaveVisibility { .. }
+                | Command::SaveQuery { .. }
+                | Command::DeleteSavedQuery(_)
                 | Command::SaveApiKey { .. }
                 | Command::ClearApiKey(_)
         )
@@ -269,6 +278,11 @@ pub enum Event {
     Visibility {
         connection: ConnectionId,
         result: Result<Option<Vec<String>>, String>,
+    },
+    SavedQueries(Result<Vec<domain::SavedQuery>, String>),
+    QuerySaved {
+        tab: TabId,
+        result: Result<domain::SavedQuery, String>,
     },
     Destinations {
         items: Vec<application::registry::DestinationInfo>,

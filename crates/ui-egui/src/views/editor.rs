@@ -15,7 +15,7 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
     };
 
     let running = matches!(p.selected_tab().map(|t| &t.state), Some(TabState::Running));
-    let (mut run, mut cancel) = (false, false);
+    let (mut run, mut cancel, mut save) = (false, false, false);
     let shortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -31,6 +31,10 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
             let label = format!("Run query   {}", ui.ctx().format_shortcut(&shortcut));
             run = ui
                 .add_enabled(!running, theme::primary_button(label))
+                .clicked();
+            save = ui
+                .button("Save")
+                .on_hover_text("Keep this query under a name (Ctrl+S)")
                 .clicked();
             if running {
                 cancel = ui.button("Cancel").clicked();
@@ -62,6 +66,9 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
         .auto_shrink([false, false])
         .show(ui, |ui| super::code_editor::show(ui, p, id, height));
 
+    if save {
+        p.save_current();
+    }
     if run {
         p.run(id);
     }
@@ -80,11 +87,14 @@ fn tab_bar(ui: &mut egui::Ui, p: &mut Presenter) {
         for tab in &p.tabs {
             let selected = p.selected == Some(tab.id);
             let running = matches!(tab.state, TabState::Running);
-            let title = if running {
+            let mut title = if running {
                 format!("{} ...", tab.title)
             } else {
                 tab.title.clone()
             };
+            if p.is_dirty(tab.id) {
+                title = format!("\u{25CF} {title}");
+            }
             let text = RichText::new(title).color(if selected { pal.text } else { pal.text_muted });
             let response = ui.add(egui::Button::new(text).frame(false));
             if response.clicked() {

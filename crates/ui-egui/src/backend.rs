@@ -436,6 +436,23 @@ async fn handle(sh: Arc<Shared>, command: Command) {
             }
             sh.emit(Event::Exported { tab, result });
         }
+        Command::LoadSavedQueries => {
+            let result = uc.saved_queries.list().await.map_err(text);
+            sh.emit(Event::SavedQueries(result));
+        }
+        Command::SaveQuery { tab, draft } => {
+            // Counts only: a saved query's name and SQL can contain sensitive literals.
+            let result = uc.saved_queries.save(draft).await.map_err(text);
+            tracing::info!(ok = result.is_ok(), "query saved");
+            sh.emit(Event::QuerySaved { tab, result });
+        }
+        Command::DeleteSavedQuery(id) => match uc.saved_queries.delete(id).await {
+            Ok(()) => {
+                let result = uc.saved_queries.list().await.map_err(text);
+                sh.emit(Event::SavedQueries(result));
+            }
+            Err(e) => sh.emit(Event::Notice(Err(text(e)))),
+        },
         Command::LoadDestinations => {
             sh.emit(Event::Destinations {
                 items: uc.destinations.list(),

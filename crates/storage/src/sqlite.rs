@@ -3,15 +3,16 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use application::ports::{
-    ConnectionRepository, HistoryEntry, QueryHistoryRepository, SettingsRepository, StorageError,
+    ConnectionRepository, HistoryEntry, QueryHistoryRepository, SavedQueryRepository,
+    SettingsRepository, StorageError,
 };
 use async_trait::async_trait;
-use domain::{ConnectionId, ConnectionProfile, DriverKind, SecretRef};
+use domain::{ConnectionId, ConnectionProfile, DriverKind, SavedQuery, SavedQueryId, SecretRef};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 /// Current schema version, stored in `PRAGMA user_version`.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const MIGRATION_V1: &str = "
 CREATE TABLE connections (
@@ -45,6 +46,18 @@ CREATE TABLE settings (
 );
 ";
 
+/// Version 2 adds saved queries. It only adds a table, so existing data is untouched.
+const MIGRATION_V2: &str = "
+    CREATE TABLE saved_queries (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        text TEXT NOT NULL,
+        connection_id TEXT,
+        updated_at_ms INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX saved_queries_by_name ON saved_queries(lower(name));
+";
+
 /// SQLite-backed connection, history and settings repositories (one database file).
 ///
 /// Operations are short and synchronous; use cases run on the background runtime.
@@ -76,9 +89,16 @@ impl SqliteStore {
                 "database schema version {version} is newer than supported {SCHEMA_VERSION}"
             )));
         }
+        // Each step runs in its own transaction, so an interrupted upgrade can be repeated.
         if version < 1 {
             conn.execute_batch(&format!(
-                "BEGIN; {MIGRATION_V1} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+                "BEGIN; {MIGRATION_V1} PRAGMA user_version = 1; COMMIT;"
+            ))
+            .map_err(backend)?;
+        }
+        if version < 2 {
+            conn.execute_batch(&format!(
+                "BEGIN; {MIGRATION_V2} PRAGMA user_version = 2; COMMIT;"
             ))
             .map_err(backend)?;
         }
@@ -293,6 +313,73 @@ impl SettingsRepository for SqliteStore {
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value = ?2",
                 params![key, value],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SavedQueryRepository for SqliteStore {
+    async fn list(&self) -> Result<Vec<SavedQuery>, StorageError> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, text, connection_id, updated_at_ms FROM saved_queries
+                 ORDER BY lower(name), id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, text, connection, updated) = row.map_err(backend)?;
+            out.push(SavedQuery {
+                id: SavedQueryId(Uuid::parse_str(&id).map_err(|e| {
+                    StorageError::Backend(format!("invalid saved query id in database: {e}"))
+                })?),
+                name,
+                text,
+                connection: connection.as_deref().map(parse_id).transpose()?,
+                updated_at: from_millis(updated),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn save(&self, query: SavedQuery) -> Result<(), StorageError> {
+        self.conn()
+            .execute(
+                "INSERT INTO saved_queries (id, name, text, connection_id, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                     name = ?2, text = ?3, connection_id = ?4, updated_at_ms = ?5",
+                params![
+                    query.id.0.to_string(),
+                    query.name,
+                    query.text,
+                    query.connection.map(|c| c.0.to_string()),
+                    to_millis(query.updated_at),
+                ],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn delete(&self, id: SavedQueryId) -> Result<(), StorageError> {
+        self.conn()
+            .execute(
+                "DELETE FROM saved_queries WHERE id = ?1",
+                [id.0.to_string()],
             )
             .map_err(backend)?;
         Ok(())

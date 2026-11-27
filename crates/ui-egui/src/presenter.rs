@@ -23,10 +23,12 @@ mod export;
 mod grid;
 mod instances;
 mod palette;
+mod saved;
 pub use export::{ExportUi, TestState};
 pub use grid::{GridState, NULL_TEXT, ReviewKind, ReviewLine};
 pub use instances::{DatabaseRow, InstanceTab, InstancesState};
 pub use palette::{PaletteAction, PaletteItem, PaletteState};
+pub use saved::SaveDialog;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -85,6 +87,9 @@ pub struct QueryTab {
     pub completion: CompletionState,
     /// Staged row edits for the current result.
     pub grid: GridState,
+    /// The saved query this tab shows, and its text as saved (for the unsaved-changes marker).
+    pub saved: Option<domain::SavedQueryId>,
+    pub saved_text: String,
 }
 
 /// Which panel is shown on the right.
@@ -115,6 +120,11 @@ pub struct Presenter {
     pub export: ExportUi,
     /// The configured export destinations (from the configuration file).
     pub destinations: Vec<DestinationInfo>,
+    /// The saved queries (sidebar), by name.
+    pub saved: Vec<domain::SavedQuery>,
+    pub save_dialog: Option<SaveDialog>,
+    /// A saved query the user asked to delete and has not confirmed yet.
+    pub confirm_delete: Option<domain::SavedQueryId>,
     /// Things wrong with the export configuration, for the Storage connections dialog.
     pub destination_problems: Vec<String>,
     pub destination_tests: std::collections::HashMap<String, TestState>,
@@ -166,6 +176,7 @@ impl Presenter {
         );
         outbox.push(Command::LoadUiPrefs);
         outbox.push(Command::LoadDestinations);
+        outbox.push(Command::LoadSavedQueries);
         Self {
             connections: Vec::new(),
             connecting: HashSet::new(),
@@ -182,6 +193,9 @@ impl Presenter {
             inline: InlineState::new(),
             export: ExportUi::default(),
             destinations: Vec::new(),
+            saved: Vec::new(),
+            save_dialog: None,
+            confirm_delete: None,
             destination_problems: Vec::new(),
             destination_tests: std::collections::HashMap::new(),
             storage_dialog: None,
@@ -312,6 +326,8 @@ impl Presenter {
             state: TabState::Idle,
             completion: CompletionState::default(),
             grid: GridState::default(),
+            saved: None,
+            saved_text: String::new(),
         });
         self.select_tab(id);
         Some(id)
@@ -894,6 +910,8 @@ impl Presenter {
     pub fn handle(&mut self, event: Event) {
         match event {
             Event::Exported { result, .. } => self.on_exported(result),
+            Event::SavedQueries(result) => self.on_saved_queries(result),
+            Event::QuerySaved { tab, result } => self.on_query_saved(tab, result),
             Event::Destinations { items, problems } => self.on_destinations(items, problems),
             Event::DestinationTested { name, result } => {
                 self.destination_tests.insert(
@@ -1109,7 +1127,8 @@ mod tests {
                 Command::LoadAiSettings,
                 Command::LoadInlineSettings,
                 Command::LoadUiPrefs,
-                Command::LoadDestinations
+                Command::LoadDestinations,
+                Command::LoadSavedQueries
             ]
         ));
         p
@@ -1661,7 +1680,8 @@ mod tests {
         assert!(matches!(&cmds[3], Command::LoadApiKeyStatus(id) if id.as_str() == "cloud"));
         assert!(matches!(cmds[4], Command::LoadUiPrefs));
         assert!(matches!(cmds[5], Command::LoadDestinations));
-        assert_eq!(cmds.len(), 6);
+        assert!(matches!(cmds[6], Command::LoadSavedQueries));
+        assert_eq!(cmds.len(), 7);
     }
 
     #[test]
@@ -3333,5 +3353,225 @@ mod tests {
         assert!(!p.tabs[0].grid.has_pending() && !p.tabs[0].grid.review_open);
         p.open_review(tab);
         assert!(!p.tabs[0].grid.review_open, "nothing to review");
+    }
+
+    // ---- saved queries -----------------------------------------------------------------------
+
+    fn saved_query(name: &str, text: &str, connection: Option<ConnectionId>) -> domain::SavedQuery {
+        domain::SavedQuery {
+            id: domain::SavedQueryId::new(),
+            name: name.into(),
+            text: text.into(),
+            connection,
+            updated_at: std::time::UNIX_EPOCH,
+        }
+    }
+
+    fn with_text(sql: &str) -> (Presenter, TabId) {
+        let (mut p, _, _, tab) = connected();
+        p.tab_mut(tab).expect("tab").text = sql.into();
+        (p, tab)
+    }
+
+    fn saved_cmd(p: &mut Presenter) -> Option<(Option<domain::SavedQueryId>, String, String)> {
+        p.take_commands().into_iter().find_map(|c| match c {
+            Command::SaveQuery { draft, .. } => Some((draft.id, draft.name, draft.text)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn saving_an_unnamed_query_asks_for_a_name_and_sends_nothing_yet() {
+        let (mut p, _) = with_text("select 1");
+        p.save_current();
+        assert_eq!(p.save_dialog.as_ref().map(|d| d.name.as_str()), Some(""));
+        assert!(saved_cmd(&mut p).is_none());
+        p.confirm_save();
+        assert!(saved_cmd(&mut p).is_none(), "an empty name is not sent");
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("name")));
+        p.set_save_name("  customers  ".into());
+        p.confirm_save();
+        let (id, name, text) = saved_cmd(&mut p).expect("save command");
+        assert_eq!(
+            (id, name.as_str(), text.as_str()),
+            (None, "  customers  ", "select 1")
+        );
+    }
+
+    #[test]
+    fn nothing_to_save_is_refused() {
+        let (mut p, _) = with_text("  ");
+        p.save_current();
+        assert!(p.save_dialog.is_none());
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("no SQL")));
+    }
+
+    #[test]
+    fn a_successful_save_links_the_tab_names_it_and_closes_the_dialog() {
+        let (mut p, tab) = with_text("select 1");
+        p.save_current();
+        p.set_save_name("customers".into());
+        p.confirm_save();
+        let q = saved_query("customers", "select 1", None);
+        p.handle(Event::QuerySaved {
+            tab,
+            result: Ok(q.clone()),
+        });
+        assert!(p.save_dialog.is_none());
+        assert_eq!(p.saved, vec![q.clone()]);
+        let t = p.tabs.iter().find(|t| t.id == tab).expect("tab");
+        assert_eq!((t.saved, t.title.as_str()), (Some(q.id), "customers"));
+        assert!(!p.is_dirty(tab));
+        assert!(matches!(&p.status, Some(Status::Info(m)) if m.contains("customers")));
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_dialog_open_for_another_name() {
+        let (mut p, tab) = with_text("select 1");
+        p.save_current();
+        p.set_save_name("taken".into());
+        p.handle(Event::QuerySaved {
+            tab,
+            result: Err("A saved query named `taken` already exists.".into()),
+        });
+        assert!(p.save_dialog.is_some());
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("already exists")));
+    }
+
+    #[test]
+    fn saving_a_linked_tab_updates_in_place_and_edits_show_as_unsaved() {
+        let (mut p, tab) = with_text("select 1");
+        let q = saved_query("report", "select 1", None);
+        p.handle(Event::SavedQueries(Ok(vec![q.clone()])));
+        p.open_saved(q.id);
+        let linked = p.selected.expect("tab");
+        assert_ne!(linked, tab, "opened in its own tab");
+        assert_eq!(
+            p.tabs
+                .iter()
+                .find(|t| t.id == linked)
+                .map(|t| t.text.clone()),
+            Some("select 1".into())
+        );
+        assert!(!p.is_dirty(linked));
+        p.tab_mut(linked).expect("tab").text = "select 2".into();
+        assert!(p.is_dirty(linked));
+        p.save_current();
+        assert!(p.save_dialog.is_none(), "no name is asked for an update");
+        let (id, name, text) = saved_cmd(&mut p).expect("save command");
+        assert_eq!(
+            (id, name.as_str(), text.as_str()),
+            (Some(q.id), "report", "select 2")
+        );
+    }
+
+    #[test]
+    fn save_as_makes_a_new_copy() {
+        let (mut p, _) = with_text("select 1");
+        let q = saved_query("report", "select 1", None);
+        p.handle(Event::SavedQueries(Ok(vec![q.clone()])));
+        p.open_saved(q.id);
+        p.open_save_dialog(true);
+        assert_eq!(
+            p.save_dialog.as_ref().map(|d| d.name.as_str()),
+            Some("report")
+        );
+        p.set_save_name("report copy".into());
+        p.confirm_save();
+        let (id, name, _) = saved_cmd(&mut p).expect("save command");
+        assert_eq!((id, name.as_str()), (None, "report copy"));
+    }
+
+    #[test]
+    fn opening_prefers_the_queries_own_connection_and_never_runs_it() {
+        let (mut p, id, session, tab) = connected();
+        let q = saved_query("report", "select 1", Some(id));
+        p.handle(Event::SavedQueries(Ok(vec![q.clone()])));
+        p.take_commands();
+        p.open_saved(q.id);
+        let opened = p.selected.expect("tab");
+        assert_ne!(opened, tab);
+        assert_eq!(
+            p.tabs.iter().find(|t| t.id == opened).map(|t| t.session),
+            Some(session)
+        );
+        assert!(
+            !p.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::Execute { .. })),
+            "opening must not execute anything"
+        );
+        // Opening it again selects the tab that already shows it.
+        p.select_tab(tab);
+        p.open_saved(q.id);
+        assert_eq!(p.selected, Some(opened));
+        assert_eq!(p.tabs.len(), 2);
+    }
+
+    #[test]
+    fn opening_without_any_connection_explains_what_to_do() {
+        let mut p = presenter();
+        let q = saved_query("report", "select 1", None);
+        p.handle(Event::SavedQueries(Ok(vec![q.clone()])));
+        p.open_saved(q.id);
+        assert!(p.tabs.is_empty());
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("Connect")));
+    }
+
+    #[test]
+    fn deleting_needs_a_confirmation_and_leaves_open_tabs_unlinked() {
+        let (mut p, _) = with_text("select 1");
+        let q = saved_query("report", "select 1", None);
+        p.handle(Event::SavedQueries(Ok(vec![q.clone()])));
+        p.open_saved(q.id);
+        let linked = p.selected.expect("tab");
+        p.take_commands();
+        p.request_delete_saved(q.id);
+        assert!(p.take_commands().is_empty(), "asking is not deleting");
+        p.cancel_delete_saved();
+        p.confirm_delete_saved();
+        assert!(
+            p.take_commands().is_empty(),
+            "a cancelled request deletes nothing"
+        );
+        p.request_delete_saved(q.id);
+        p.confirm_delete_saved();
+        assert!(
+            matches!(p.take_commands().as_slice(), [Command::DeleteSavedQuery(id)] if *id == q.id)
+        );
+        p.handle(Event::SavedQueries(Ok(vec![])));
+        let t = p.tabs.iter().find(|t| t.id == linked).expect("tab stays");
+        assert_eq!(t.saved, None);
+        assert_eq!(t.text, "select 1", "the text is not lost");
+    }
+
+    #[test]
+    fn the_palette_finds_saved_queries_by_name_and_opens_them() {
+        let (mut p, _) = with_text("select 1");
+        let q = saved_query("Revenue by month", "select sum(x)\nfrom t", None);
+        p.handle(Event::SavedQueries(Ok(vec![q.clone()])));
+        p.open_palette();
+        p.set_palette_query("revenue".into());
+        let items = p.palette_items();
+        let hit = items
+            .iter()
+            .find(|i| i.section == "Saved queries")
+            .expect("saved hit");
+        assert_eq!(
+            (hit.title.as_str(), hit.subtitle.as_str()),
+            ("Revenue by month", "select sum(x)")
+        );
+        p.palette_accept();
+        assert_eq!(p.tabs.iter().filter(|t| t.saved == Some(q.id)).count(), 1);
+    }
+
+    #[test]
+    fn a_failed_load_is_reported_and_keeps_the_old_list() {
+        let mut p = presenter();
+        let q = saved_query("a", "select 1", None);
+        p.handle(Event::SavedQueries(Ok(vec![q.clone()])));
+        p.handle(Event::SavedQueries(Err("disk".into())));
+        assert_eq!(p.saved, vec![q]);
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("disk")));
     }
 }

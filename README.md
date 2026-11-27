@@ -34,6 +34,15 @@ Results of a plain `SELECT` from one table that has a primary key can be edited 
 
 Edits run as parameterised `UPDATE`/`DELETE` statements keyed by the full primary key. On PostgreSQL, MySQL/MariaDB and SQLite the whole batch runs in one transaction and is rolled back unless every change affected exactly one row. ClickHouse has no transactions: changes run one by one as mutations and a failure leaves the earlier ones applied (the review dialog says so). Read-only connections never allow edits. Joins, aliases, expressions, `DISTINCT`, grouping and views are not editable.
 
+## Saved queries
+
+**Ctrl+S** (or **Save** next to Run) keeps the query in the editor under a name. Saved queries are
+listed at the bottom of the sidebar and in the command palette (`Ctrl+K`); opening one puts it in
+its own tab on the connection it was written for (or the current one) and never runs it. A dot on
+the tab marks unsaved changes, and Ctrl+S updates the saved query in place ("Save query as..." in
+the palette makes a copy). Names are unique, ignoring case. They are stored in Fathom's local
+SQLite file (the first release with saved queries upgrades that file in place; nothing is lost).
+
 ## Exporting results
 
 **Export...** (or `Ctrl+Shift+E`) saves a result as a new file in one of your *export destinations*:

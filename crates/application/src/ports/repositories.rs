@@ -47,3 +47,13 @@ pub trait SettingsRepository: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<String>, StorageError>;
     async fn set(&self, key: &str, value: &str) -> Result<(), StorageError>;
 }
+
+/// Named queries the user saved.
+#[async_trait]
+pub trait SavedQueryRepository: Send + Sync {
+    /// All saved queries, ordered by name (case-insensitive).
+    async fn list(&self) -> Result<Vec<domain::SavedQuery>, StorageError>;
+    /// Inserts or replaces (by id).
+    async fn save(&self, query: domain::SavedQuery) -> Result<(), StorageError>;
+    async fn delete(&self, id: domain::SavedQueryId) -> Result<(), StorageError>;
+}
