@@ -146,7 +146,7 @@ pub fn parse(
         .parse()
         .map_err(|e: toml::de::Error| format!("the configuration file is not valid TOML: {e}"))?;
     let mut config = Config {
-        enabled: vec!["local".to_owned()],
+        enabled: default_enabled(),
         ..Config::default()
     };
     let export = root.get("export").and_then(toml::Value::as_table);
@@ -200,6 +200,11 @@ pub fn parse(
         }
     }
     Ok(config)
+}
+
+/// Every built-in adapter kind: the default when the configuration does not say otherwise.
+pub fn default_enabled() -> Vec<String> {
+    ["local", "s3", "smb", "nfs"].map(str::to_owned).into()
 }
 
 /// Builds the registry: only enabled kinds, through their factories. `default_local` is used
@@ -369,9 +374,9 @@ path = "/tmp/y"
     }
 
     #[test]
-    fn defaults_enable_only_local_and_reject_nonsense_limits() {
+    fn defaults_enable_every_adapter_and_reject_nonsense_limits() {
         let c = parse_with("", &[]);
-        assert_eq!(c.enabled, ["local"]);
+        assert_eq!(c.enabled, ["local", "s3", "smb", "nfs"]);
         let c = parse_with("[export]\nmax_rows = 0\nenabled = \"s3\"", &[]);
         assert_eq!(c.problems.len(), 2);
     }

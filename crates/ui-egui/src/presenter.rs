@@ -24,7 +24,7 @@ mod grid;
 mod instances;
 mod palette;
 mod saved;
-pub use export::{ExportUi, TestState};
+pub use export::{ExportUi, StorageForm, TestState};
 pub use grid::{GridState, NULL_TEXT, ReviewKind, ReviewLine};
 pub use instances::{DatabaseRow, InstanceTab, InstancesState};
 pub use palette::{PaletteAction, PaletteItem, PaletteState};
@@ -130,6 +130,10 @@ pub struct Presenter {
     pub destination_tests: std::collections::HashMap<String, TestState>,
     /// The Storage connections dialog, when open (the selected destination's name).
     pub storage_dialog: Option<Option<String>>,
+    /// The add/edit form inside the Storage connections dialog, when open.
+    pub storage_form: Option<StorageForm>,
+    /// The adapter kinds that may be added in the form.
+    pub storage_kinds: Vec<String>,
     /// Theme and panel visibility (saved; loaded at start-up).
     pub prefs: UiPrefs,
     /// The command palette, when open.
@@ -201,6 +205,8 @@ impl Presenter {
             destination_problems: Vec::new(),
             destination_tests: std::collections::HashMap::new(),
             storage_dialog: None,
+            storage_form: None,
+            storage_kinds: Vec::new(),
             prefs: UiPrefs::default(),
             palette: None,
             instances: None,
@@ -930,7 +936,20 @@ impl Presenter {
             Event::Exported { result, .. } => self.on_exported(result),
             Event::SavedQueries(result) => self.on_saved_queries(result),
             Event::QuerySaved { tab, result } => self.on_query_saved(tab, result),
-            Event::Destinations { items, problems } => self.on_destinations(items, problems),
+            Event::Destinations {
+                items,
+                problems,
+                kinds,
+            } => self.on_destinations(items, problems, kinds),
+            Event::StorageSaved(result) => self.on_storage_saved(result),
+            Event::DestinationTested { name, result } if name.is_empty() => {
+                if let Some(form) = self.storage_form.as_mut() {
+                    form.test = Some(match result {
+                        Ok(()) => TestState::Ok,
+                        Err(e) => TestState::Failed(e),
+                    });
+                }
+            }
             Event::DestinationTested { name, result } => {
                 self.destination_tests.insert(
                     name,
@@ -2488,11 +2507,14 @@ mod tests {
                 name: "Local exports".into(),
                 kind: "local".into(),
                 location: "/data/exports".into(),
+                ..DestinationInfo::default()
             },
             DestinationInfo {
                 name: "Analytics archive".into(),
                 kind: "s3".into(),
                 location: "s3://acme/exports/".into(),
+                editable: true,
+                ..DestinationInfo::default()
             },
         ]
     }
@@ -2503,6 +2525,7 @@ mod tests {
         p.handle(Event::Destinations {
             items: destinations(),
             problems: vec![],
+            kinds: vec![],
         });
         ran(&mut p, tab, sql);
         (p, tab)
@@ -2623,6 +2646,7 @@ mod tests {
         p.handle(Event::Destinations {
             items: destinations(),
             problems: vec![],
+            kinds: vec![],
         });
         p.tab_mut(tab).expect("tab").text = "bad".into();
         p.run(tab);
@@ -2689,6 +2713,7 @@ mod tests {
         p.handle(Event::Destinations {
             items: destinations()[..1].to_vec(),
             problems: vec!["bad entry".into()],
+            kinds: vec![],
         });
         assert_eq!(p.export.destination, None);
         assert_eq!(p.destination_problems, ["bad entry"]);
@@ -2715,6 +2740,52 @@ mod tests {
         );
         p.test_destination("unknown");
         assert!(p.take_commands().is_empty());
+    }
+
+    #[test]
+    fn storage_form_adds_edits_and_deletes_connections() {
+        let mut p = Presenter::new(vec![], vec![]);
+        p.handle(Event::Destinations {
+            items: destinations(),
+            problems: vec![],
+            kinds: vec!["local".into()],
+        });
+        p.open_storage_dialog();
+        p.take_commands();
+
+        p.new_storage_form("local");
+        let form = p.storage_form.as_mut().expect("form");
+        form.name = "Mine".into();
+        form.settings.insert("path".into(), "/data".into());
+        form.secrets.insert("password".into(), "hunter2".into());
+        p.test_storage_form();
+        p.submit_storage_form();
+        let cmds = p.take_commands();
+        assert!(matches!(cmds[0], Command::TestStorageDraft(_)));
+        assert!(matches!(cmds[1], Command::SaveStorage(_)));
+        // A second click while saving does nothing.
+        p.submit_storage_form();
+        assert!(p.take_commands().is_empty());
+
+        p.handle(Event::StorageSaved(Err("name taken".into())));
+        assert_eq!(
+            p.storage_form.as_ref().and_then(|f| f.error.clone()),
+            Some("name taken".into())
+        );
+        p.handle(Event::StorageSaved(Ok(())));
+        assert!(p.storage_form.is_none());
+        assert_eq!(p.storage_dialog, Some(Some("Mine".into())));
+
+        // Only app-managed connections can be edited or deleted; file ones are read-only.
+        p.edit_storage_form("Local exports");
+        assert!(p.storage_form.is_none());
+        p.edit_storage_form("Analytics archive");
+        assert!(p.storage_form.as_ref().is_some_and(|f| f.stored_secrets));
+        p.delete_storage("Local exports");
+        assert!(p.take_commands().is_empty());
+        p.delete_storage("Analytics archive");
+        assert!(matches!(p.take_commands()[0], Command::DeleteStorage(_)));
+        assert!(p.storage_form.is_none());
     }
 
     // ---- command palette ---------------------------------------------------------------------

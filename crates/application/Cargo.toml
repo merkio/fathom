@@ -13,6 +13,9 @@ domain = { path = "../domain" }
 async-trait = "0.1"
 futures = "0.3"
 secrecy = "0.10"
+# Storage connections are kept as JSON in the key/value settings (already used by the adapters).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sqlparser = "0.64"
 # Parquet export. The Apache Arrow project's implementation; default features are off, so no
 # Arrow, and `snap` (pure Rust Snappy) is the only compressor.
@@ -23,3 +26,4 @@ thiserror = "2"
 test-support = { path = "../test-support" }
 insta = "1"
 bytes = "1"
+tokio = { version = "1", features = ["macros", "rt"] }

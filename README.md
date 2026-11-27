@@ -51,16 +51,20 @@ system has mounted. Formats: CSV, JSON, SQL (`INSERT` statements, never run by F
 Parquet. You can export all rows (the query is run again, up to `max_rows`) or only the rows you
 ticked. Existing files are never overwritten.
 
-Destinations are not edited inside the app, so credentials never pass through it: they are set in
-`fathom.toml` and environment variables. The **Storage connections** dialog lists them, lets you
-test each one, and shows what is wrong with the file.
+Add destinations in the app: **Storage connections** (sidebar link or `Ctrl+K`) → **+ Add**, choose
+Local folder, SMB, NFS or S3, fill in the form, **Test connection**, **Save**. Settings are kept in
+Fathom's database; access keys and passwords go only to the OS keychain and are never shown again
+(leave a secret field empty when editing to keep it). SMB and NFS shares must be mounted by your
+operating system; Fathom writes to the mount folder. You can also declare destinations in
+`fathom.toml` (below); those appear in the dialog as read-only.
 
-### Setting up destinations (`fathom.toml`)
+### Declaring destinations in a file (`fathom.toml`, optional)
 
 1. Copy [`fathom.example.toml`](fathom.example.toml) to `fathom.toml` in Fathom's data directory
    (Linux `~/.local/share/fathom`, macOS `~/Library/Application Support/fathom`, Windows
    `%APPDATA%\fathom\data`), or point `FATHOM_CONFIG` at it. The example documents every setting.
-2. List the adapters you want in `enabled`; only those are used (`local`, `s3`, `smb`, `nfs`).
+2. All adapters (`local`, `s3`, `smb`, `nfs`) are enabled by default. To turn some off, list the ones
+   you want in `enabled`; the others are then unavailable, in the file and in the app.
 3. Add one `[[export.destination]]` table per place you export to.
 4. Credentials: write `{ env = "VAR" }` or `{ file = "/path" }` instead of the secret, or leave
    S3 keys out to use the standard AWS credential chain (environment variables, `~/.aws`, SSO, an

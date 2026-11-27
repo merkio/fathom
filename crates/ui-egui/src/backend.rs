@@ -454,9 +454,30 @@ async fn handle(sh: Arc<Shared>, command: Command) {
             Err(e) => sh.emit(Event::Notice(Err(text(e)))),
         },
         Command::LoadDestinations => {
-            sh.emit(Event::Destinations {
-                items: uc.destinations.list(),
-                problems: uc.destinations.problems().to_vec(),
+            if let Err(e) = uc.destinations.load().await {
+                sh.emit(Event::Notice(Err(text(e))));
+            }
+            emit_destinations(&sh);
+        }
+        Command::SaveStorage(draft) => match uc.destinations.save(draft).await {
+            Ok(()) => {
+                tracing::info!("storage connection saved");
+                emit_destinations(&sh);
+                sh.emit(Event::StorageSaved(Ok(())));
+            }
+            Err(e) => sh.emit(Event::StorageSaved(Err(text(e)))),
+        },
+        Command::DeleteStorage(name) => match uc.destinations.delete(&name).await {
+            Ok(()) => emit_destinations(&sh),
+            Err(e) => sh.emit(Event::Notice(Err(text(e)))),
+        },
+        Command::TestStorageDraft(draft) => {
+            let result = uc.destinations.test_draft(&draft).await.map_err(text);
+            tracing::info!(ok = result.is_ok(), "storage connection form tested");
+            // An empty name marks the result of the form's own test.
+            sh.emit(Event::DestinationTested {
+                name: String::new(),
+                result,
             });
         }
         Command::TestDestination(name) => {
@@ -475,6 +496,15 @@ async fn handle(sh: Arc<Shared>, command: Command) {
             sh.emit(Event::Models { provider, result });
         }
     }
+}
+
+fn emit_destinations(sh: &Arc<Shared>) {
+    let uc = &sh.use_cases;
+    sh.emit(Event::Destinations {
+        items: uc.destinations.list(),
+        problems: uc.destinations.problems(),
+        kinds: uc.destinations.kinds(),
+    });
 }
 
 fn assist_request(ask: &AiAsk) -> AssistRequest<'_> {
