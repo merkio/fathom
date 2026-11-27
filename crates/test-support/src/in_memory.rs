@@ -195,3 +195,29 @@ mod tests {
         assert_eq!(FixedClock(UNIX_EPOCH).now(), UNIX_EPOCH);
     }
 }
+
+#[derive(Default)]
+pub struct InMemorySavedQueries {
+    items: Mutex<Vec<domain::SavedQuery>>,
+}
+
+#[async_trait]
+impl application::ports::SavedQueryRepository for InMemorySavedQueries {
+    async fn list(&self) -> Result<Vec<domain::SavedQuery>, StorageError> {
+        let mut all = lock(&self.items).clone();
+        all.sort_by_key(|q| q.name.to_lowercase());
+        Ok(all)
+    }
+
+    async fn save(&self, query: domain::SavedQuery) -> Result<(), StorageError> {
+        let mut items = lock(&self.items);
+        items.retain(|q| q.id != query.id);
+        items.push(query);
+        Ok(())
+    }
+
+    async fn delete(&self, id: domain::SavedQueryId) -> Result<(), StorageError> {
+        lock(&self.items).retain(|q| q.id != id);
+        Ok(())
+    }
+}

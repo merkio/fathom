@@ -10,7 +10,8 @@ pub mod llm_contract;
 pub use fake_driver::{FakeDriver, FakeSession};
 pub use fake_llm::FakeLlm;
 pub use in_memory::{
-    FixedClock, InMemoryConnections, InMemoryHistory, InMemorySecrets, InMemorySettings,
+    FixedClock, InMemoryConnections, InMemoryHistory, InMemorySavedQueries, InMemorySecrets,
+    InMemorySettings,
 };
 
 use std::sync::{Mutex, MutexGuard, PoisonError};

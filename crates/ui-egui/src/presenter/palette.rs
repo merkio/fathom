@@ -22,6 +22,9 @@ pub enum PaletteAction {
     NewQuery,
     ManageInstances,
     ExportResults,
+    SaveQuery,
+    SaveQueryAs,
+    OpenSaved(domain::SavedQueryId),
     StorageConnections,
     OpenTable {
         session: SessionId,
@@ -162,6 +165,22 @@ impl Presenter {
                 None,
             ),
             item(
+                PaletteAction::SaveQuery,
+                "Workspace",
+                "Save query",
+                "Keep this SQL under a name",
+                Some("Ctrl+S"),
+                None,
+            ),
+            item(
+                PaletteAction::SaveQueryAs,
+                "Workspace",
+                "Save query as...",
+                "Save a copy under another name",
+                None,
+                None,
+            ),
+            item(
                 PaletteAction::ExportResults,
                 "Workspace",
                 "Export results...",
@@ -207,6 +226,23 @@ impl Presenter {
         items.sort_by_key(|it| !title_matches(&state.query, it));
 
         if !state.query.trim().is_empty() {
+            let saved: Vec<PaletteItem> = self
+                .saved
+                .iter()
+                .map(|q| {
+                    item(
+                        PaletteAction::OpenSaved(q.id),
+                        "Saved queries",
+                        &q.name,
+                        q.text.lines().next().unwrap_or_default(),
+                        None,
+                        None,
+                    )
+                })
+                .filter(|it| matches(&state.query, it))
+                .take(MAX_TABLE_RESULTS)
+                .collect();
+            items.extend(saved);
             let tables = self.open.iter().flat_map(|o| {
                 let schema = match &o.schema {
                     super::Load::Ready(tree) => Some(tree),
@@ -274,6 +310,9 @@ impl Presenter {
             PaletteAction::Theme(theme) => self.set_theme(theme),
             PaletteAction::ManageInstances => self.open_instances(None),
             PaletteAction::ExportResults => self.open_export_dialog(),
+            PaletteAction::SaveQuery => self.save_current(),
+            PaletteAction::SaveQueryAs => self.open_save_dialog(true),
+            PaletteAction::OpenSaved(id) => self.open_saved(id),
             PaletteAction::StorageConnections => self.open_storage_dialog(),
             PaletteAction::NewQuery => {
                 let session = self

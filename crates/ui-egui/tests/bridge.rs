@@ -13,7 +13,8 @@ use domain::{
     TableKind, Value,
 };
 use test_support::{
-    FakeDriver, InMemoryConnections, InMemoryHistory, InMemorySecrets, InMemorySettings,
+    FakeDriver, InMemoryConnections, InMemoryHistory, InMemorySavedQueries, InMemorySecrets,
+    InMemorySettings,
 };
 use ui_egui::{Backend, Command, Event, SessionId, TabId};
 
@@ -49,6 +50,7 @@ fn setup() -> (Backend, Receiver<Event>, FakeDriver) {
             drivers: Arc::new(drivers),
             providers: Arc::new(LlmRegistry::new()),
             settings: Arc::new(InMemorySettings::default()),
+            saved_queries: Arc::new(InMemorySavedQueries::default()),
         },
         ExecuteOptions::default(),
     );
@@ -152,6 +154,7 @@ fn notify_is_called_for_every_event() {
             drivers: Arc::new(drivers),
             providers: Arc::new(LlmRegistry::new()),
             settings: Arc::new(InMemorySettings::default()),
+            saved_queries: Arc::new(InMemorySavedQueries::default()),
         },
         ExecuteOptions::default(),
     );
@@ -221,6 +224,7 @@ fn ai_env(llm: &FakeLlm) -> (Backend, Receiver<Event>, FakeDriver, Arc<InMemoryS
             drivers: Arc::new(drivers),
             providers: Arc::new(providers),
             settings: Arc::new(InMemorySettings::default()),
+            saved_queries: Arc::new(InMemorySavedQueries::default()),
         },
         ExecuteOptions::default(),
     );
@@ -621,6 +625,7 @@ fn inline_env(chunks: &[&str]) -> InlineEnv {
             drivers: Arc::new(drivers),
             providers: Arc::new(providers),
             settings: Arc::new(InMemorySettings::default()),
+            saved_queries: Arc::new(InMemorySavedQueries::default()),
         },
         ExecuteOptions::default(),
     );
@@ -859,6 +864,7 @@ fn provider_failures_are_reported_in_the_done_event() {
             drivers: Arc::new(drivers),
             providers: Arc::new(providers),
             settings: Arc::new(InMemorySettings::default()),
+            saved_queries: Arc::new(InMemorySavedQueries::default()),
         },
         ExecuteOptions::default(),
     );
@@ -891,6 +897,50 @@ fn inline_settings_round_trip_through_the_backend() {
         panic!("settings")
     };
     assert!(s.enabled && s.provider.as_ref().map(|p| p.as_str()) == Some("fake"));
+}
+
+#[test]
+fn saved_queries_round_trip_through_the_backend_and_names_stay_unique() {
+    use application::usecases::SaveDraft;
+    let e = inline_env(&[]);
+    let draft = |name: &str, text: &str| SaveDraft {
+        id: None,
+        name: name.into(),
+        text: text.into(),
+        connection: None,
+    };
+    e.backend.send(Command::SaveQuery {
+        tab: TabId(1),
+        draft: draft("customers", "select * from customers"),
+    });
+    let Event::QuerySaved {
+        result: Ok(first), ..
+    } = next(&e.events)
+    else {
+        panic!("expected a saved query")
+    };
+    e.backend.send(Command::SaveQuery {
+        tab: TabId(1),
+        draft: draft("CUSTOMERS", "select 2"),
+    });
+    let Event::QuerySaved {
+        result: Err(message),
+        ..
+    } = next(&e.events)
+    else {
+        panic!("expected a refusal")
+    };
+    assert!(message.contains("already exists"), "{message}");
+
+    e.backend.send(Command::LoadSavedQueries);
+    let Event::SavedQueries(Ok(list)) = next(&e.events) else {
+        panic!("list")
+    };
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].text, "select * from customers");
+
+    e.backend.send(Command::DeleteSavedQuery(first.id));
+    assert!(matches!(next(&e.events), Event::SavedQueries(Ok(list)) if list.is_empty()));
 }
 
 #[test]
@@ -1030,6 +1080,7 @@ fn export_env(row_count: i64, max_rows: u32) -> ExportEnv {
             drivers: Arc::new(drivers),
             providers: Arc::new(LlmRegistry::new()),
             settings: Arc::new(InMemorySettings::default()),
+            saved_queries: Arc::new(InMemorySavedQueries::default()),
         },
         ExecuteOptions::default(),
     )
@@ -1470,6 +1521,7 @@ fn only_settings_and_key_writes_are_ordered() {
         Command::SaveAiSettings(AiSettings::default()),
         Command::SaveInlineSettings(InlineSettings::default()),
         Command::SaveUiPrefs(application::usecases::UiPrefs::default()),
+        Command::DeleteSavedQuery(domain::SavedQueryId::new()),
         Command::SaveVisibility {
             connection: domain::ConnectionId::new(),
             visible: vec![],

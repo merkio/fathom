@@ -6,14 +6,15 @@ use std::sync::Arc;
 use domain::{DriverKind, ProviderId};
 
 use crate::ports::{
-    Clock, ConnectionRepository, QueryHistoryRepository, SecretStore, SettingsRepository,
+    Clock, ConnectionRepository, QueryHistoryRepository, SavedQueryRepository, SecretStore,
+    SettingsRepository,
 };
 use crate::registry::{DestinationRegistry, DriverRegistry, LlmRegistry};
 use crate::usecases::{
     AiSettingsStore, ApiKeys, ApplyChanges, Assistant, BrowseSchema, CloseSession,
     DeleteConnection, ExecuteOptions, ExecuteQuery, ExplorerVisibilityStore, ListConnections,
-    ListModels, OpenSession, QueryHistory, SaveConnection, SuggestInline, TestConnection,
-    UiPrefsStore,
+    ListModels, OpenSession, QueryHistory, SaveConnection, SavedQueries, SuggestInline,
+    TestConnection, UiPrefsStore,
 };
 
 /// The adapters (as ports) the use cases need.
@@ -25,6 +26,7 @@ pub struct Ports {
     pub drivers: Arc<DriverRegistry>,
     pub providers: Arc<LlmRegistry>,
     pub settings: Arc<dyn SettingsRepository>,
+    pub saved_queries: Arc<dyn SavedQueryRepository>,
 }
 
 /// Token budget for the schema part of a prompt.
@@ -64,6 +66,7 @@ pub struct UseCases {
     /// The export destinations the user configured.
     pub destinations: Arc<DestinationRegistry>,
     pub ui_prefs: UiPrefsStore,
+    pub saved_queries: SavedQueries,
     pub explorer_visibility: ExplorerVisibilityStore,
     drivers: Arc<DriverRegistry>,
     providers: Arc<LlmRegistry>,
@@ -79,6 +82,7 @@ impl UseCases {
             drivers,
             providers,
             settings,
+            saved_queries,
         } = ports;
         Self {
             list_connections: ListConnections::new(connections.clone()),
@@ -88,7 +92,7 @@ impl UseCases {
             open_session: OpenSession::new(connections, drivers.clone(), secrets.clone()),
             close_session: CloseSession,
             browse_schema: BrowseSchema,
-            execute_query: ExecuteQuery::new(history.clone(), clock, options),
+            execute_query: ExecuteQuery::new(history.clone(), clock.clone(), options),
             apply_changes: ApplyChanges,
             query_history: QueryHistory::new(history),
             assistant: Assistant::new(providers.clone(), SCHEMA_TOKEN_BUDGET),
@@ -96,6 +100,7 @@ impl UseCases {
             export: ExportOptions::default(),
             destinations: Arc::new(DestinationRegistry::new()),
             ui_prefs: UiPrefsStore::new(settings.clone()),
+            saved_queries: SavedQueries::new(saved_queries, clock.clone()),
             explorer_visibility: ExplorerVisibilityStore::new(settings.clone()),
             ai_settings: AiSettingsStore::new(settings),
             api_keys: ApiKeys::new(providers.clone(), secrets),

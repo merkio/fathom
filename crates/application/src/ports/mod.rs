@@ -12,6 +12,7 @@ pub use database::{DatabaseDriver, DbError, DbSession, IntrospectScope};
 pub use export::{DestinationConfig, DestinationFactory, ExportDestination, ExportError};
 pub use llm::{LlmChunk, LlmError, LlmProvider, LlmRequest, LlmResponse, ModelInfo, Usage};
 pub use repositories::{
-    ConnectionRepository, HistoryEntry, QueryHistoryRepository, SettingsRepository, StorageError,
+    ConnectionRepository, HistoryEntry, QueryHistoryRepository, SavedQueryRepository,
+    SettingsRepository, StorageError,
 };
 pub use secrets::{SecretError, SecretStore};

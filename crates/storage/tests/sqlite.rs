@@ -2,11 +2,11 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use application::ports::{
-    ConnectionRepository, HistoryEntry, QueryHistoryRepository, SecretStore, SettingsRepository,
-    StorageError,
+    ConnectionRepository, HistoryEntry, QueryHistoryRepository, SavedQueryRepository, SecretStore,
+    SettingsRepository, StorageError,
 };
 use application::usecases::SaveConnection;
-use domain::{ConnectionId, ConnectionProfile, DriverKind, SecretRef};
+use domain::{ConnectionId, ConnectionProfile, DriverKind, SavedQuery, SavedQueryId, SecretRef};
 use futures::executor::block_on;
 use secrecy::{ExposeSecret, SecretString};
 use storage::{MemorySecretStore, SqliteStore};
@@ -25,7 +25,7 @@ fn connection_crud_round_trips_every_field() {
     let store = SqliteStore::open_in_memory().expect("open");
     let mut p = profile("main");
     p.secret_ref = Some(SecretRef::for_connection(p.id));
-    block_on(store.save(p.clone())).expect("save");
+    block_on(ConnectionRepository::save(&store, p.clone())).expect("save");
     assert_eq!(
         block_on(ConnectionRepository::get(&store, p.id)),
         Ok(p.clone())
@@ -34,15 +34,18 @@ fn connection_crud_round_trips_every_field() {
     p.name = "renamed".into();
     p.options.clear();
     p.options.insert("timeout".into(), "5".into());
-    block_on(store.save(p.clone())).expect("update");
-    assert_eq!(block_on(store.list()).expect("list"), vec![p.clone()]);
+    block_on(ConnectionRepository::save(&store, p.clone())).expect("update");
+    assert_eq!(
+        block_on(ConnectionRepository::list(&store)).expect("list"),
+        vec![p.clone()]
+    );
 
-    block_on(store.delete(p.id)).expect("delete");
+    block_on(ConnectionRepository::delete(&store, p.id)).expect("delete");
     assert_eq!(
         block_on(ConnectionRepository::get(&store, p.id)),
         Err(StorageError::NotFound)
     );
-    block_on(store.delete(p.id)).expect("delete missing is fine");
+    block_on(ConnectionRepository::delete(&store, p.id)).expect("delete missing is fine");
 }
 
 #[test]
@@ -52,7 +55,7 @@ fn data_survives_reopening_the_file() {
     let p = profile("persisted");
     {
         let store = SqliteStore::open(&path).expect("open");
-        block_on(store.save(p.clone())).expect("save");
+        block_on(ConnectionRepository::save(&store, p.clone())).expect("save");
         block_on(SettingsRepository::set(&store, "theme", "dark")).expect("setting");
     }
     let store = SqliteStore::open(&path).expect("reopen");
@@ -165,4 +168,136 @@ fn keyring_store_round_trip() {
     assert_eq!(got.expose_secret(), "pw");
     block_on(store.delete(&key)).expect("delete");
     assert!(block_on(store.get(&key)).expect("get").is_none());
+}
+
+fn saved(name: &str, text: &str) -> SavedQuery {
+    SavedQuery {
+        id: SavedQueryId::new(),
+        name: name.into(),
+        text: text.into(),
+        connection: Some(ConnectionId::new()),
+        updated_at: UNIX_EPOCH + Duration::from_millis(1_700_000_000_000),
+    }
+}
+
+#[test]
+fn saved_queries_round_trip_in_name_order_and_upsert_by_id() {
+    let store = SqliteStore::open_in_memory().expect("open");
+    let (b, a) = (saved("beta", "select 2"), saved("Alpha", "select 1"));
+    block_on(SavedQueryRepository::save(&store, b.clone())).expect("save b");
+    block_on(SavedQueryRepository::save(&store, a.clone())).expect("save a");
+    let list = block_on(SavedQueryRepository::list(&store)).expect("list");
+    assert_eq!(
+        list,
+        vec![a.clone(), b.clone()],
+        "ordered by name ignoring case, all fields kept"
+    );
+
+    let renamed = SavedQuery {
+        name: "gamma".into(),
+        text: "select 3".into(),
+        connection: None,
+        ..a.clone()
+    };
+    block_on(SavedQueryRepository::save(&store, renamed.clone())).expect("update");
+    let list = block_on(SavedQueryRepository::list(&store)).expect("list");
+    assert_eq!(
+        list,
+        vec![b.clone(), renamed],
+        "updated in place, not duplicated"
+    );
+
+    block_on(SavedQueryRepository::delete(&store, b.id)).expect("delete");
+    block_on(SavedQueryRepository::delete(&store, b.id)).expect("deleting twice is fine");
+    assert_eq!(
+        block_on(SavedQueryRepository::list(&store))
+            .expect("list")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn the_database_itself_refuses_two_queries_with_the_same_name() {
+    let store = SqliteStore::open_in_memory().expect("open");
+    block_on(SavedQueryRepository::save(
+        &store,
+        saved("Report", "select 1"),
+    ))
+    .expect("first");
+    let clash = block_on(SavedQueryRepository::save(
+        &store,
+        saved("REPORT", "select 2"),
+    ));
+    assert!(
+        clash.is_err(),
+        "case-insensitive uniqueness is enforced below the use case too"
+    );
+}
+
+#[test]
+fn saved_queries_survive_reopening_the_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("fathom.sqlite");
+    let q = saved("keep", "select 1");
+    {
+        let store = SqliteStore::open(&path).expect("open");
+        block_on(SavedQueryRepository::save(&store, q.clone())).expect("save");
+    }
+    let store = SqliteStore::open(&path).expect("reopen");
+    assert_eq!(
+        block_on(SavedQueryRepository::list(&store)).expect("list"),
+        vec![q]
+    );
+}
+
+#[test]
+fn a_version_1_database_upgrades_in_place_without_losing_data() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("old.sqlite");
+    let id = ConnectionId::new();
+    {
+        // The schema exactly as version 1 created it, with a connection and a setting in it.
+        let c = rusqlite::Connection::open(&path).expect("create");
+        c.execute_batch(
+            "CREATE TABLE connections (id TEXT PRIMARY KEY, name TEXT NOT NULL, driver_kind TEXT NOT NULL,
+                 host TEXT NOT NULL, port INTEGER, database TEXT, username TEXT NOT NULL, secret_ref TEXT);
+             CREATE TABLE connection_options (connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+                 key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (connection_id, key));
+             CREATE TABLE query_history (seq INTEGER PRIMARY KEY AUTOINCREMENT, connection_id TEXT NOT NULL,
+                 text TEXT NOT NULL, executed_at_ms INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL, succeeded INTEGER NOT NULL);
+             CREATE INDEX query_history_by_connection ON query_history(connection_id, seq);
+             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             PRAGMA user_version = 1;",
+        )
+        .expect("v1 schema");
+        c.execute(
+            "INSERT INTO connections (id, name, driver_kind, host, username) VALUES (?1, 'old', 'postgres', 'h', 'u')",
+            [id.0.to_string()],
+        )
+        .expect("connection");
+        c.execute("INSERT INTO settings VALUES ('theme', 'dark')", [])
+            .expect("setting");
+    }
+    let store = SqliteStore::open(&path).expect("upgrade");
+    assert_eq!(
+        block_on(ConnectionRepository::list(&store))
+            .expect("connections")
+            .len(),
+        1,
+        "old data is kept"
+    );
+    assert_eq!(
+        block_on(SettingsRepository::get(&store, "theme")),
+        Ok(Some("dark".into()))
+    );
+    block_on(SavedQueryRepository::save(&store, saved("new", "select 1")))
+        .expect("the new table works");
+    drop(store);
+    let version: i64 = rusqlite::Connection::open(&path)
+        .and_then(|c| c.query_row("PRAGMA user_version", [], |r| r.get(0)))
+        .expect("version");
+    assert_eq!(version, 2);
+    // Opening again must not try to migrate twice.
+    SqliteStore::open(&path).expect("reopen after upgrade");
 }

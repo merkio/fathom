@@ -168,7 +168,8 @@ fn main() -> anyhow::Result<()> {
         Ports {
             connections: store.clone(),
             history: store.clone(),
-            settings: store,
+            settings: store.clone(),
+            saved_queries: store,
             secrets,
             clock: Arc::new(SystemClock),
             drivers: Arc::new(drivers),
