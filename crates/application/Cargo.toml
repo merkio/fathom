@@ -14,8 +14,12 @@ async-trait = "0.1"
 futures = "0.3"
 secrecy = "0.10"
 sqlparser = "0.64"
+# Parquet export. The Apache Arrow project's implementation; default features are off, so no
+# Arrow, and `snap` (pure Rust Snappy) is the only compressor.
+parquet = { version = "60", default-features = false, features = ["snap"] }
 thiserror = "2"
 
 [dev-dependencies]
 test-support = { path = "../test-support" }
 insta = "1"
+bytes = "1"

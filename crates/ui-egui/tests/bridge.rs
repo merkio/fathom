@@ -948,15 +948,57 @@ use application::export::ExportFormat;
 use application::usecases::ExportOptions;
 use ui_egui::ExportDone;
 
+/// An export destination that keeps files in memory and, like every real one, never overwrites.
+#[derive(Default)]
+struct MemoryDestination(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+#[async_trait::async_trait]
+impl application::ports::ExportDestination for MemoryDestination {
+    fn kind(&self) -> &'static str {
+        "memory"
+    }
+    fn describe(&self) -> String {
+        "memory://".into()
+    }
+    async fn test(&self) -> Result<(), application::ports::ExportError> {
+        Ok(())
+    }
+    async fn put(
+        &self,
+        path: &str,
+        data: Vec<u8>,
+    ) -> Result<String, application::ports::ExportError> {
+        use application::ports::ExportError;
+        if path.split('/').any(|s| s == "..") {
+            return Err(ExportError::Invalid("outside".into()));
+        }
+        let mut files = self.0.lock().expect("lock");
+        if files.contains_key(path) {
+            return Err(ExportError::AlreadyExists(path.into()));
+        }
+        files.insert(path.into(), data);
+        Ok(format!("memory://{path}"))
+    }
+}
+
+impl MemoryDestination {
+    fn text(&self, path: &str) -> Option<String> {
+        self.0
+            .lock()
+            .expect("lock")
+            .get(path)
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+    }
+}
+
 struct ExportEnv {
     backend: Backend,
     events: Receiver<Event>,
     driver: FakeDriver,
-    dir: tempfile::TempDir,
+    files: Arc<MemoryDestination>,
 }
 
 fn export_env(row_count: i64, max_rows: u32) -> ExportEnv {
-    let dir = tempfile::tempdir().expect("tempdir");
     let result = QueryResult {
         columns: vec![
             ResultColumn {
@@ -976,6 +1018,9 @@ fn export_env(row_count: i64, max_rows: u32) -> ExportEnv {
     let driver = FakeDriver::new("fake").with_result(result);
     let mut drivers = DriverRegistry::new();
     drivers.register(Arc::new(driver.clone()));
+    let files = Arc::new(MemoryDestination::default());
+    let mut destinations = application::registry::DestinationRegistry::new();
+    destinations.register("Memory", files.clone());
     let use_cases = UseCases::new(
         Ports {
             connections: Arc::new(InMemoryConnections::default()),
@@ -988,16 +1033,14 @@ fn export_env(row_count: i64, max_rows: u32) -> ExportEnv {
         },
         ExecuteOptions::default(),
     )
-    .with_export(ExportOptions {
-        directory: dir.path().to_path_buf(),
-        max_rows,
-    });
+    .with_export(ExportOptions { max_rows })
+    .with_destinations(Arc::new(destinations));
     let (backend, events) = Backend::spawn(Arc::new(use_cases), || {});
     ExportEnv {
         backend,
         events,
         driver,
-        dir,
+        files,
     }
 }
 
@@ -1029,13 +1072,28 @@ impl ExportEnv {
         format: ExportFormat,
         name: &str,
     ) -> Result<ExportDone, String> {
+        self.export_to(s, "Memory", "", sql, format, name)
+    }
+
+    fn export_to(
+        &self,
+        s: (SessionId, domain::ConnectionId),
+        destination: &str,
+        folder: &str,
+        sql: &str,
+        format: ExportFormat,
+        name: &str,
+    ) -> Result<ExportDone, String> {
         self.backend.send(Command::Export {
             tab: TabId(1),
             session: s.0,
             connection: s.1,
-            text: sql.into(),
-            format,
+            source: ui_egui::ExportSource::Query(sql.into()),
+            destination: destination.into(),
+            folder: folder.into(),
             name: name.into(),
+            format,
+            table: Some("people".into()),
         });
         let Event::Exported { result, .. } = next(&self.events) else {
             panic!("expected Exported")
@@ -1092,24 +1150,77 @@ fn exports_write_a_new_file_with_the_full_result() {
     let e = export_env(3, 100);
     let s = e.connect(false);
     let done = e
-        .export(s, "select * from t", ExportFormat::Csv, "people")
+        .export_to(
+            s,
+            "Memory",
+            "exports/today",
+            "select * from t",
+            ExportFormat::Csv,
+            "people",
+        )
         .expect("export");
-    assert_eq!(done.path, e.dir.path().join("people.csv"));
+    assert_eq!(done.location, "memory://exports/today/people.csv");
     assert_eq!((done.rows, done.truncated), (3, false));
     assert_eq!(
-        std::fs::read_to_string(&done.path).expect("file"),
+        e.files.text("exports/today/people.csv").expect("file"),
         "id,name\r\n1,n1\r\n2,n2\r\n3,n3\r\n"
     );
 
     let json = e
         .export(s, "select * from t", ExportFormat::Json, "people")
         .expect("json");
-    assert_eq!(json.path, e.dir.path().join("people.json"));
+    assert_eq!(json.location, "memory://people.json");
     assert!(
-        std::fs::read_to_string(&json.path)
+        e.files
+            .text("people.json")
             .expect("file")
             .contains("{\"id\": 1, \"name\": \"n1\"}")
     );
+
+    let sql = e
+        .export(s, "select * from t", ExportFormat::Sql, "people")
+        .expect("sql");
+    assert_eq!(sql.location, "memory://people.sql");
+    assert!(
+        e.files
+            .text("people.sql")
+            .expect("file")
+            .starts_with("INSERT INTO \"people\" (\"id\", \"name\") VALUES (1, 'n1');")
+    );
+}
+
+#[test]
+fn selected_rows_are_exported_as_given_without_touching_the_database() {
+    let e = export_env(3, 100);
+    let s = e.connect(false);
+    let rows = QueryResult {
+        columns: vec![ResultColumn {
+            name: "id".into(),
+            data_type: domain::DataType::new("int"),
+        }],
+        rows: vec![vec![Value::Int(7)]],
+        ..QueryResult::empty()
+    };
+    e.backend.send(Command::Export {
+        tab: TabId(1),
+        session: s.0,
+        connection: s.1,
+        source: ui_egui::ExportSource::Rows(rows),
+        destination: "Memory".into(),
+        folder: String::new(),
+        name: "picked".into(),
+        format: ExportFormat::Csv,
+        table: None,
+    });
+    let Event::Exported {
+        result: Ok(done), ..
+    } = next(&e.events)
+    else {
+        panic!("expected a finished export")
+    };
+    assert_eq!(done.rows, 1);
+    assert_eq!(e.files.text("picked.csv").expect("file"), "id\r\n7\r\n");
+    assert!(e.driver.executed().is_empty(), "no query was run");
 }
 
 #[test]
@@ -1120,20 +1231,16 @@ fn the_row_cap_truncates_the_export_and_says_so() {
         .export(s, "select * from t", ExportFormat::Csv, "capped")
         .expect("export");
     assert_eq!((done.rows, done.truncated), (4, true));
-    assert_eq!(
-        std::fs::read_to_string(&done.path)
-            .expect("file")
-            .lines()
-            .count(),
-        5
-    );
+    assert_eq!(e.files.text("capped.csv").expect("file").lines().count(), 5);
 }
 
 #[test]
 fn an_existing_file_is_never_overwritten() {
     let e = export_env(3, 100);
     let s = e.connect(false);
-    std::fs::write(e.dir.path().join("keep.csv"), "precious").expect("seed");
+    e.export(s, "select * from t", ExportFormat::Csv, "keep")
+        .expect("first");
+    let before = e.files.text("keep.csv").expect("file");
     let err = e
         .export(s, "select * from t", ExportFormat::Csv, "keep")
         .expect_err("must refuse");
@@ -1141,16 +1248,11 @@ fn an_existing_file_is_never_overwritten() {
         err.contains("already exists") && err.contains("never overwritten"),
         "{err}"
     );
-    assert_eq!(
-        std::fs::read_to_string(e.dir.path().join("keep.csv")).expect("file"),
-        "precious"
-    );
-    // The refusal happened before running anything.
-    assert!(e.driver.executed().is_empty());
+    assert_eq!(e.files.text("keep.csv").expect("file"), before);
 }
 
 #[test]
-fn a_blocked_or_empty_export_leaves_no_file_behind() {
+fn a_blocked_or_empty_export_writes_nothing() {
     let e = export_env(3, 100);
     let ro = e.connect(true);
     let err = e
@@ -1161,7 +1263,7 @@ fn a_blocked_or_empty_export_leaves_no_file_behind() {
         err.contains("Hint:") && err.contains("Turn off read-only mode"),
         "friendly text: {err}"
     );
-    assert!(!e.dir.path().join("nope.csv").exists(), "no partial file");
+    assert!(e.files.text("nope.csv").is_none(), "no partial file");
     assert!(
         e.driver.executed().is_empty(),
         "nothing reached the database"
@@ -1169,7 +1271,7 @@ fn a_blocked_or_empty_export_leaves_no_file_behind() {
 }
 
 #[test]
-fn exporting_from_a_closed_session_or_with_a_bad_name_fails_cleanly() {
+fn exporting_to_an_unknown_destination_closed_session_or_bad_path_fails_cleanly() {
     let e = export_env(1, 10);
     let (_, id) = e.connect(false);
     let err = e
@@ -1177,10 +1279,43 @@ fn exporting_from_a_closed_session_or_with_a_bad_name_fails_cleanly() {
         .expect_err("closed");
     assert!(err.contains("closed"), "{err}");
     let s = e.connect(false);
+    let err = e
+        .export_to(s, "Nowhere", "", "select 1", ExportFormat::Csv, "x")
+        .expect_err("unknown destination");
+    assert!(err.contains("not a configured destination"), "{err}");
     assert!(
-        e.export(s, "select 1", ExportFormat::Csv, "folder/")
+        e.export(s, "select 1", ExportFormat::Csv, "folder/x")
             .is_err()
     );
+    assert!(
+        e.export_to(s, "Memory", "../up", "select 1", ExportFormat::Csv, "x")
+            .is_err()
+    );
+}
+
+#[test]
+fn destinations_are_listed_and_tested_through_the_backend() {
+    let e = export_env(1, 10);
+    e.backend.send(Command::LoadDestinations);
+    let Event::Destinations { items, problems } = next(&e.events) else {
+        panic!("expected Destinations")
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        (items[0].name.as_str(), items[0].kind.as_str()),
+        ("Memory", "memory")
+    );
+    assert!(problems.is_empty());
+    e.backend.send(Command::TestDestination("Memory".into()));
+    assert!(matches!(
+        next(&e.events),
+        Event::DestinationTested { result: Ok(()), .. }
+    ));
+    e.backend.send(Command::TestDestination("Nowhere".into()));
+    assert!(matches!(
+        next(&e.events),
+        Event::DestinationTested { result: Err(_), .. }
+    ));
 }
 
 #[test]

@@ -20,6 +20,8 @@ db-mysql = { path = "../db-mysql" }
 db-postgres = { path = "../db-postgres" }
 db-sqlite = { path = "../db-sqlite" }
 db-clickhouse = { path = "../db-clickhouse" }
+export-local = { path = "../export-local" }
+export-s3 = { path = "../export-s3" }
 llm-anthropic = { path = "../llm-anthropic" }
 llm-ollama = { path = "../llm-ollama" }
 llm-openai = { path = "../llm-openai" }
@@ -28,5 +30,6 @@ anyhow = "1"
 directories = "6"
 futures = "0.3"
 secrecy = "0.10"
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

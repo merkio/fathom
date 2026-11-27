@@ -2,8 +2,6 @@
 //!
 //! Errors cross the bridge as display strings: the UI only shows them.
 
-use std::path::PathBuf;
-
 use application::export::ExportFormat;
 use application::ports::{HistoryEntry, ModelInfo};
 use application::usecases::{
@@ -146,15 +144,36 @@ pub enum Command {
         connection: ConnectionId,
         visible: Vec<String>,
     },
-    /// Re-runs `text` (up to the export row cap) and writes the result to a new file.
+    /// Exports the rows to a new file in a configured destination. Existing files are never
+    /// overwritten.
     Export {
         tab: TabId,
         session: SessionId,
         connection: ConnectionId,
-        text: String,
-        format: ExportFormat,
+        source: ExportSource,
+        /// The configured destination's name.
+        destination: String,
+        /// Folder inside the destination (may be empty).
+        folder: String,
+        /// File name (empty: a default; a missing extension is added).
         name: String,
+        format: ExportFormat,
+        /// The table the rows came from, for the SQL format.
+        table: Option<String>,
     },
+    /// Lists the configured export destinations.
+    LoadDestinations,
+    /// Checks that a destination can be written to.
+    TestDestination(String),
+}
+
+/// Which rows an export holds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExportSource {
+    /// Run this statement again, up to the export row cap (may hold more than the grid).
+    Query(String),
+    /// Exactly these rows, already on screen (the user's selection).
+    Rows(domain::QueryResult),
 }
 
 impl Command {
@@ -176,7 +195,8 @@ impl Command {
 /// A finished export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportDone {
-    pub path: PathBuf,
+    /// Where the file ended up (a path, an `s3://` URL, ...), for display.
+    pub location: String,
     pub rows: usize,
     /// More rows existed than the cap allowed.
     pub truncated: bool,
@@ -249,6 +269,14 @@ pub enum Event {
     Visibility {
         connection: ConnectionId,
         result: Result<Option<Vec<String>>, String>,
+    },
+    Destinations {
+        items: Vec<application::registry::DestinationInfo>,
+        problems: Vec<String>,
+    },
+    DestinationTested {
+        name: String,
+        result: Result<(), String>,
     },
     Exported {
         tab: TabId,

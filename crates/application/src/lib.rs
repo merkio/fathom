@@ -3,6 +3,7 @@
 pub mod error;
 pub mod error_text;
 pub mod export;
+pub mod export_parquet;
 pub mod llm;
 pub mod ports;
 pub mod redact;

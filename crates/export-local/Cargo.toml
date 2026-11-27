@@ -1,0 +1,20 @@
+[package]
+name = "export-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+domain = { path = "../domain" }
+application = { path = "../application" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+test-support = { path = "../test-support" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

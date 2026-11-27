@@ -15,8 +15,7 @@ use domain::{Dialect, QueryRequest, SchemaTree};
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use crate::bridge::{AiAsk, AiId, Command, Event, ExportDone, SessionId};
-use crate::export::resolve_path;
+use crate::bridge::{AiAsk, AiId, Command, Event, ExportDone, ExportSource, SessionId};
 
 const HISTORY_LIMIT: usize = 200;
 
@@ -408,12 +407,26 @@ async fn handle(sh: Arc<Shared>, command: Command) {
             tab,
             session,
             connection,
-            text: sql,
-            format,
+            source,
+            destination,
+            folder,
             name,
+            format,
+            table,
         } => {
-            let result = run_export(&sh, session, connection, sql, format, name).await;
+            let request = ExportRequest {
+                session,
+                connection,
+                source,
+                destination,
+                folder,
+                name,
+                format,
+                table,
+            };
+            let result = run_export(&sh, request).await;
             match &result {
+                // Counts only: never the location (it can contain bucket and folder names).
                 Ok(done) => tracing::info!(
                     rows = done.rows,
                     truncated = done.truncated,
@@ -422,6 +435,23 @@ async fn handle(sh: Arc<Shared>, command: Command) {
                 Err(message) => tracing::warn!(error = %redact(message), "export failed"),
             }
             sh.emit(Event::Exported { tab, result });
+        }
+        Command::LoadDestinations => {
+            sh.emit(Event::Destinations {
+                items: uc.destinations.list(),
+                problems: uc.destinations.problems().to_vec(),
+            });
+        }
+        Command::TestDestination(name) => {
+            let result = match uc.destinations.get(&name) {
+                Some(destination) => destination
+                    .test()
+                    .await
+                    .map_err(|e| text(UseCaseError::Export(e))),
+                None => Err(format!("`{name}` is not a configured destination.")),
+            };
+            tracing::info!(ok = result.is_ok(), "destination tested");
+            sh.emit(Event::DestinationTested { name, result });
         }
         Command::ListModels(provider) => {
             let result = uc.list_models.execute(&provider).await.map_err(text);
@@ -581,61 +611,61 @@ async fn run_inline(sh: &Arc<Shared>, id: AiId, session: SessionId, editor: Stri
 
 /// Re-runs the statement (up to the export cap) and writes it to a **new** file: an existing
 /// file is never overwritten, and a failed export leaves no partial file behind.
-async fn run_export(
-    sh: &Arc<Shared>,
+struct ExportRequest {
     session: SessionId,
     connection: domain::ConnectionId,
-    sql: String,
-    format: application::export::ExportFormat,
+    source: ExportSource,
+    destination: String,
+    folder: String,
     name: String,
-) -> Result<ExportDone, String> {
-    use std::io::Write;
+    format: application::export::ExportFormat,
+    table: Option<String>,
+}
+
+async fn run_export(sh: &Arc<Shared>, req: ExportRequest) -> Result<ExportDone, String> {
+    use application::export::SqlOptions;
 
     let uc = &sh.use_cases;
-    let open = sh.session(session).await?;
-    let path = resolve_path(&uc.export.directory, &name, format)?;
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).map_err(|e| text(UseCaseError::Io(e.to_string())))?;
-    }
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::AlreadyExists => {
-                format!("`{}` already exists. Choose another name; existing files are never overwritten.", path.display())
-            }
-            _ => text(UseCaseError::Io(e.to_string())),
-        })?;
-    let mut out = std::io::BufWriter::new(file);
-
-    let summary = ExportResult::new(&uc.execute_query)
-        .run(
-            connection,
-            open.session.as_ref(),
-            &sql,
-            &open.dialect,
-            open.read_only,
-            format,
-            uc.export.max_rows,
-            &mut out,
-        )
-        .await;
-    let finished = summary.and_then(|s| {
-        out.flush()
-            .map(|()| s)
-            .map_err(|e| UseCaseError::Io(e.to_string()))
-    });
-    match finished {
-        Ok(summary) => Ok(ExportDone {
-            path,
-            rows: summary.rows,
-            truncated: summary.truncated,
-        }),
-        Err(e) => {
-            drop(out);
-            let _ = std::fs::remove_file(&path);
-            Err(text(e))
+    let open = sh.session(req.session).await?;
+    let destination = uc
+        .destinations
+        .get(&req.destination)
+        .ok_or_else(|| format!("`{}` is not a configured destination.", req.destination))?;
+    let (rows, truncated) = match req.source {
+        ExportSource::Query(sql) => {
+            let result = ExportResult::new(&uc.execute_query)
+                .fetch(
+                    req.connection,
+                    open.session.as_ref(),
+                    &sql,
+                    &open.dialect,
+                    open.read_only,
+                    uc.export.max_rows,
+                )
+                .await
+                .map_err(text)?;
+            let truncated = result.truncated;
+            (result, truncated)
         }
-    }
+        ExportSource::Rows(result) => (result, false),
+    };
+    let table = req.table.as_deref().unwrap_or("exported_data");
+    let delivered = application::usecases::deliver(
+        destination.as_ref(),
+        &req.folder,
+        &req.name,
+        req.format,
+        &rows,
+        &SqlOptions {
+            table,
+            dialect: &open.dialect,
+        },
+    )
+    .await
+    .map_err(text)?;
+    Ok(ExportDone {
+        location: delivered.location,
+        rows: rows.rows.len(),
+        truncated,
+    })
 }

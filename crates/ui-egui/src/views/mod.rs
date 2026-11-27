@@ -5,11 +5,13 @@ mod ai;
 mod code_editor;
 mod connections;
 mod editor;
+mod export;
 mod history;
 mod instances;
 mod palette;
 mod results;
 mod schema;
+mod storage;
 
 use application::usecases::ThemePreference;
 use eframe::egui::{
@@ -70,6 +72,8 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
         .show(ui, |ui| editor::show(ui, p));
     connections::show_form(ui.ctx(), p);
     results::review_dialog(ui.ctx(), p);
+    storage::show(ui.ctx(), p);
+    export::show(ui.ctx(), p);
     instances::show(ui.ctx(), p);
     palette::show(ui.ctx(), p);
 }
@@ -77,11 +81,12 @@ pub fn show(ui: &mut egui::Ui, p: &mut Presenter) {
 /// Window-wide shortcuts. The palette owns the keyboard while it is open.
 fn shortcuts(ui: &egui::Ui, p: &mut Presenter) {
     let cmd = Modifiers::COMMAND;
-    let (mut open, mut focus, mut explorer, mut results, mut side) =
-        (false, false, false, false, false);
+    let (mut open, mut focus, mut explorer, mut results, mut side, mut export) =
+        (false, false, false, false, false, false);
     ui.input_mut(|i| {
         // The shifted shortcut first: `Cmd+F` must not swallow `Cmd+Shift+F`.
         focus = i.consume_shortcut(&KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::F));
+        export = i.consume_shortcut(&KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::E));
         open = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::K));
         explorer = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Num1));
         results = i.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Num2));
@@ -96,6 +101,9 @@ fn shortcuts(ui: &egui::Ui, p: &mut Presenter) {
     }
     if focus {
         p.focus_mode();
+    }
+    if export {
+        p.open_export_dialog();
     }
     if explorer {
         p.toggle_explorer();

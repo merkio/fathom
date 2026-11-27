@@ -34,6 +34,40 @@ Results of a plain `SELECT` from one table that has a primary key can be edited 
 
 Edits run as parameterised `UPDATE`/`DELETE` statements keyed by the full primary key. On PostgreSQL, MySQL/MariaDB and SQLite the whole batch runs in one transaction and is rolled back unless every change affected exactly one row. ClickHouse has no transactions: changes run one by one as mutations and a failure leaves the earlier ones applied (the review dialog says so). Read-only connections never allow edits. Joins, aliases, expressions, `DISTINCT`, grouping and views are not editable.
 
+## Exporting results
+
+**Export...** (or `Ctrl+Shift+E`) saves a result as a new file in one of your *export destinations*:
+a local folder, Amazon S3 or an S3-compatible service, or an SMB/NFS share that your operating
+system has mounted. Formats: CSV, JSON, SQL (`INSERT` statements, never run by Fathom) and
+Parquet. You can export all rows (the query is run again, up to `max_rows`) or only the rows you
+ticked. Existing files are never overwritten.
+
+Destinations are not edited inside the app, so credentials never pass through it: they are set in
+`fathom.toml` and environment variables. The **Storage connections** dialog lists them, lets you
+test each one, and shows what is wrong with the file.
+
+### Setting up destinations (`fathom.toml`)
+
+1. Copy [`fathom.example.toml`](fathom.example.toml) to `fathom.toml` in Fathom's data directory
+   (Linux `~/.local/share/fathom`, macOS `~/Library/Application Support/fathom`, Windows
+   `%APPDATA%\fathom\data`), or point `FATHOM_CONFIG` at it. The example documents every setting.
+2. List the adapters you want in `enabled`; only those are used (`local`, `s3`, `smb`, `nfs`).
+3. Add one `[[export.destination]]` table per place you export to.
+4. Credentials: write `{ env = "VAR" }` or `{ file = "/path" }` instead of the secret, or leave
+   S3 keys out to use the standard AWS credential chain (environment variables, `~/.aws`, SSO, an
+   instance role). Keys named `access_key_id`, `secret_access_key`, `session_token`, `password`
+   and `token` are never logged or displayed.
+5. Open **Storage connections** (command palette, `Ctrl+K`) and press **Test connection**.
+
+A mistake in one destination never stops the app: that destination is skipped and the dialog
+explains why. Without a file, exports go to a "Local exports" folder in your documents directory.
+
+| Kind | Needs | Notes |
+|---|---|---|
+| `local` | `path` | Created if missing |
+| `s3` | `bucket`, optional `region`, `prefix`, `endpoint`, `profile`, keys | Needs `s3:PutObject` and `s3:GetObject`; an `endpoint` switches to path-style addressing for MinIO, R2 and similar |
+| `smb`, `nfs` | `path` (the mount point) | Mount the share with your OS first; Fathom refuses to write if it is not mounted |
+
 ## Privacy: what leaves your machine
 
 | Feature | What is sent | Default |
@@ -68,6 +102,7 @@ Environment variables:
 
 | Variable | Meaning |
 |---|---|
+| `FATHOM_CONFIG` | Path of the configuration file (default: `fathom.toml` in the data directory) |
 | `FATHOM_DATA_DIR` | Where the SQLite settings/history file and the log live (default: the platform data directory) |
 | `FATHOM_SECRET_STORE=memory` | Do not use the OS keychain; keep passwords in memory only |
 | `FATHOM_LOG` | Log level or filter (default `info`), e.g. `debug` |
