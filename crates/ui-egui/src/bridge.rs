@@ -172,6 +172,11 @@ pub enum Command {
     DeleteSavedQuery(domain::SavedQueryId),
     /// Checks that a destination can be written to.
     TestDestination(String),
+    /// Saves a storage connection from the form (new or edited), then re-sends the list.
+    SaveStorage(application::usecases::ConnectionDraft),
+    DeleteStorage(String),
+    /// Tests the form's values without saving.
+    TestStorageDraft(application::usecases::ConnectionDraft),
 }
 
 /// Which rows an export holds.
@@ -287,7 +292,11 @@ pub enum Event {
     Destinations {
         items: Vec<application::registry::DestinationInfo>,
         problems: Vec<String>,
+        /// The adapter kinds the user may add.
+        kinds: Vec<String>,
     },
+    /// Result of saving a storage connection from the form.
+    StorageSaved(Result<(), String>),
     DestinationTested {
         name: String,
         result: Result<(), String>,

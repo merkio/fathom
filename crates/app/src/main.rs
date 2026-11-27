@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use application::ports::{DestinationFactory, SecretStore, SystemClock};
 use application::registry::{DriverRegistry, LlmRegistry};
-use application::usecases::{ExecuteOptions, ExportOptions, Ports, UseCases};
+use application::usecases::{ExecuteOptions, ExportOptions, Ports, StorageConnections, UseCases};
 use domain::SecretRef;
 use secrecy::SecretString;
 use storage::{KeyringSecretStore, MemorySecretStore, SqliteStore};
@@ -120,7 +120,7 @@ fn load_config(data: &std::path::Path) -> config::Config {
         .unwrap_or_else(|| data.join("fathom.toml"));
     let Ok(text) = std::fs::read_to_string(&path) else {
         return config::Config {
-            enabled: vec!["local".into()],
+            enabled: config::default_enabled(),
             ..config::Config::default()
         };
     };
@@ -140,7 +140,7 @@ fn load_config(data: &std::path::Path) -> config::Config {
         Err(message) => {
             tracing::warn!(file = %path.display(), error = %message, "configuration ignored");
             config::Config {
-                enabled: vec!["local".into()],
+                enabled: config::default_enabled(),
                 problems: vec![format!("{}: {message}", path.display())],
                 ..config::Config::default()
             }
@@ -164,6 +164,13 @@ fn main() -> anyhow::Result<()> {
     let secrets = secret_store();
     let llm = llm_providers(secrets.clone())?;
 
+    let storage = Arc::new(StorageConnections::new(
+        store.clone(),
+        secrets.clone(),
+        export_factories(),
+        config.enabled.clone(),
+        config::build_registry(&config, &export_factories(), &export_dir(&data)),
+    ));
     let use_cases = UseCases::new(
         Ports {
             connections: store.clone(),
@@ -182,11 +189,7 @@ fn main() -> anyhow::Result<()> {
             .max_export_rows
             .unwrap_or(application::usecases::DEFAULT_MAX_EXPORT_ROWS),
     })
-    .with_destinations(Arc::new(config::build_registry(
-        &config,
-        &export_factories(),
-        &export_dir(&data),
-    )));
+    .with_destinations(storage);
 
     ui_egui::run(Arc::new(use_cases)).map_err(|e| anyhow!("{e}"))
 }

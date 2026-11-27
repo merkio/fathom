@@ -1031,6 +1031,22 @@ impl application::ports::ExportDestination for MemoryDestination {
     }
 }
 
+/// Creates in-memory destinations, so connections can be added through the backend.
+struct MemoryFactory;
+
+impl application::ports::DestinationFactory for MemoryFactory {
+    fn kind(&self) -> &'static str {
+        "memory"
+    }
+    fn create(
+        &self,
+        _: &application::ports::DestinationConfig,
+    ) -> Result<Arc<dyn application::ports::ExportDestination>, application::ports::ExportError>
+    {
+        Ok(Arc::new(MemoryDestination::default()))
+    }
+}
+
 impl MemoryDestination {
     fn text(&self, path: &str) -> Option<String> {
         self.0
@@ -1085,7 +1101,13 @@ fn export_env(row_count: i64, max_rows: u32) -> ExportEnv {
         ExecuteOptions::default(),
     )
     .with_export(ExportOptions { max_rows })
-    .with_destinations(Arc::new(destinations));
+    .with_destinations(Arc::new(application::usecases::StorageConnections::new(
+        Arc::new(InMemorySettings::default()),
+        Arc::new(InMemorySecrets::default()),
+        vec![Box::new(MemoryFactory)],
+        vec!["memory".into()],
+        destinations,
+    )));
     let (backend, events) = Backend::spawn(Arc::new(use_cases), || {});
     ExportEnv {
         backend,
@@ -1348,7 +1370,10 @@ fn exporting_to_an_unknown_destination_closed_session_or_bad_path_fails_cleanly(
 fn destinations_are_listed_and_tested_through_the_backend() {
     let e = export_env(1, 10);
     e.backend.send(Command::LoadDestinations);
-    let Event::Destinations { items, problems } = next(&e.events) else {
+    let Event::Destinations {
+        items, problems, ..
+    } = next(&e.events)
+    else {
         panic!("expected Destinations")
     };
     assert_eq!(items.len(), 1);
@@ -1537,4 +1562,40 @@ fn only_settings_and_key_writes_are_ordered() {
     ] {
         assert!(!command.is_ordered(), "{command:?} must stay concurrent");
     }
+}
+
+#[test]
+fn storage_connections_can_be_added_tested_listed_and_deleted() {
+    let e = export_env(1, 10);
+    let draft = |name: &str| application::usecases::ConnectionDraft {
+        name: name.into(),
+        kind: "memory".into(),
+        settings: [("path".to_owned(), "/x".to_owned())].into(),
+        ..Default::default()
+    };
+    e.backend.send(Command::TestStorageDraft(draft("Mine")));
+    assert!(matches!(
+        next(&e.events),
+        Event::DestinationTested { name, result: Ok(()) } if name.is_empty()
+    ));
+    e.backend.send(Command::TestStorageDraft(draft("")));
+    assert!(matches!(
+        next(&e.events),
+        Event::DestinationTested { result: Err(_), .. }
+    ));
+    e.backend.send(Command::SaveStorage(draft("Mine")));
+    let Event::Destinations { items, kinds, .. } = next(&e.events) else {
+        panic!("expected Destinations")
+    };
+    assert_eq!(kinds, ["memory"]);
+    let mine = items.iter().find(|i| i.name == "Mine").expect("listed");
+    assert!(mine.editable);
+    assert!(matches!(next(&e.events), Event::StorageSaved(Ok(()))));
+    e.backend.send(Command::SaveStorage(draft("Mine")));
+    assert!(matches!(next(&e.events), Event::StorageSaved(Err(_))));
+    e.backend.send(Command::DeleteStorage("Mine".into()));
+    let Event::Destinations { items, .. } = next(&e.events) else {
+        panic!("expected Destinations")
+    };
+    assert!(items.iter().all(|i| i.name != "Mine"));
 }

@@ -109,6 +109,10 @@ impl DestinationRegistry {
         &self.problems
     }
 
+    pub fn remove(&mut self, name: &str) {
+        self.items.retain(|i| i.name != name);
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<dyn ExportDestination>> {
         self.items
             .iter()
@@ -124,14 +128,20 @@ impl DestinationRegistry {
                 name: i.name.clone(),
                 kind: i.destination.kind().to_owned(),
                 location: i.destination.describe(),
+                editable: false,
+                settings: std::collections::BTreeMap::new(),
             })
             .collect()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DestinationInfo {
     pub name: String,
     pub kind: String,
     pub location: String,
+    /// Whether the user can edit it in the app (those from `fathom.toml` cannot).
+    pub editable: bool,
+    /// The non-secret settings, for the edit form.
+    pub settings: std::collections::BTreeMap<String, String>,
 }

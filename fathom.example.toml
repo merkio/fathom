@@ -13,7 +13,8 @@
 
 [export]
 # Which kinds of destination may be used. A destination whose kind is not listed here is
-# ignored (and the Storage connections dialog says why). Default: ["local"].
+# ignored (and the Storage connections dialog says why). Also decides which kinds the dialog's
+# "+ Add" menu offers. Default: all of them.
 #   local  a folder on this machine
 #   s3     Amazon S3 and S3-compatible storage (MinIO, Cloudflare R2, Ceph, ...)
 #   smb    a Windows/Samba share that your operating system has mounted

@@ -261,9 +261,12 @@ dependencies = [
  "insta",
  "parquet",
  "secrecy",
+ "serde",
+ "serde_json",
  "sqlparser",
  "test-support",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

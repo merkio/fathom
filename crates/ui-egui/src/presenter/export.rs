@@ -49,7 +49,119 @@ pub enum TestState {
     Failed(String),
 }
 
+/// The add/edit form of a storage connection. Typed secrets live here only until submitted.
+#[derive(Debug, Clone, Default)]
+pub struct StorageForm {
+    /// The connection being edited (`None` for a new one).
+    pub original: Option<String>,
+    pub name: String,
+    pub kind: String,
+    pub settings: std::collections::BTreeMap<String, String>,
+    pub secrets: std::collections::BTreeMap<String, String>,
+    /// Secrets already stored for the connection (the form shows "unchanged").
+    pub stored_secrets: bool,
+    pub test: Option<TestState>,
+    pub error: Option<String>,
+    pub busy: bool,
+    pub confirm_delete: bool,
+}
+
+impl StorageForm {
+    fn draft(&self) -> application::usecases::ConnectionDraft {
+        application::usecases::ConnectionDraft {
+            original_name: self.original.clone(),
+            name: self.name.clone(),
+            kind: self.kind.clone(),
+            settings: self.settings.clone(),
+            secrets: self
+                .secrets
+                .iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, v)| (k.clone(), secrecy::SecretString::from(v.clone())))
+                .collect(),
+        }
+    }
+}
+
 impl Presenter {
+    /// Opens an empty form for a new connection of `kind`.
+    pub fn new_storage_form(&mut self, kind: &str) {
+        self.storage_form = Some(StorageForm {
+            kind: kind.to_owned(),
+            ..StorageForm::default()
+        });
+    }
+
+    pub fn edit_storage_form(&mut self, name: &str) {
+        let Some(d) = self
+            .destinations
+            .iter()
+            .find(|d| d.name == name && d.editable)
+        else {
+            return;
+        };
+        self.storage_form = Some(StorageForm {
+            original: Some(d.name.clone()),
+            name: d.name.clone(),
+            kind: d.kind.clone(),
+            settings: d.settings.clone(),
+            stored_secrets: true,
+            ..StorageForm::default()
+        });
+    }
+
+    pub fn cancel_storage_form(&mut self) {
+        self.storage_form = None;
+    }
+
+    pub fn submit_storage_form(&mut self) {
+        if let Some(form) = self.storage_form.as_mut().filter(|f| !f.busy) {
+            form.busy = true;
+            form.error = None;
+            self.outbox.push(Command::SaveStorage(form.draft()));
+        }
+    }
+
+    pub fn test_storage_form(&mut self) {
+        if let Some(form) = self
+            .storage_form
+            .as_mut()
+            .filter(|f| !matches!(f.test, Some(TestState::Testing)))
+        {
+            form.test = Some(TestState::Testing);
+            self.outbox.push(Command::TestStorageDraft(form.draft()));
+        }
+    }
+
+    pub fn delete_storage(&mut self, name: &str) {
+        if self
+            .destinations
+            .iter()
+            .any(|d| d.name == name && d.editable)
+        {
+            self.outbox.push(Command::DeleteStorage(name.to_owned()));
+            self.storage_form = None;
+            self.destination_tests.remove(name);
+            self.storage_dialog = Some(None);
+        }
+    }
+
+    pub(super) fn on_storage_saved(&mut self, result: Result<(), String>) {
+        let Some(form) = self.storage_form.as_mut() else {
+            return;
+        };
+        form.busy = false;
+        match result {
+            Ok(()) => {
+                let name = form.name.trim().to_owned();
+                self.storage_form = None;
+                self.destination_tests.remove(&name);
+                self.storage_dialog = Some(Some(name));
+            }
+            Err(message) => form.error = Some(message),
+        }
+    }
+
     /// Whether the selected tab shows a result that can be exported.
     pub fn can_export(&self) -> bool {
         self.selected_tab().is_some_and(|t| {
@@ -203,9 +315,18 @@ impl Presenter {
         });
     }
 
-    pub(super) fn on_destinations(&mut self, items: Vec<DestinationInfo>, problems: Vec<String>) {
+    pub(super) fn on_destinations(
+        &mut self,
+        items: Vec<DestinationInfo>,
+        problems: Vec<String>,
+        kinds: Vec<String>,
+    ) {
         self.destinations = items;
         self.destination_problems = problems;
+        self.storage_kinds = kinds;
+        if self.storage_dialog == Some(None) {
+            self.storage_dialog = Some(self.destinations.first().map(|d| d.name.clone()));
+        }
         if self
             .export
             .destination

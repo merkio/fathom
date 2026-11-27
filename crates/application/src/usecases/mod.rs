@@ -10,6 +10,7 @@ pub mod explorer;
 pub mod export;
 pub mod inline;
 pub mod saved_queries;
+pub mod storage_connections;
 pub mod ui_prefs;
 
 pub use ai::{AiSettings, AiSettingsStore, ApiKeys, ListModels};
@@ -28,4 +29,5 @@ pub use inline::{
     InlineCompletion, InlineRequest, InlineSettings, InlineSettingsStore, SuggestInline,
 };
 pub use saved_queries::{SaveDraft, SavedQueries};
+pub use storage_connections::{ConnectionDraft, FieldSpec, StorageConnections, form_for};
 pub use ui_prefs::{ThemePreference, UiPrefs, UiPrefsStore};

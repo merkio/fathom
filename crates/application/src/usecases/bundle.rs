@@ -13,8 +13,8 @@ use crate::registry::{DestinationRegistry, DriverRegistry, LlmRegistry};
 use crate::usecases::{
     AiSettingsStore, ApiKeys, ApplyChanges, Assistant, BrowseSchema, CloseSession,
     DeleteConnection, ExecuteOptions, ExecuteQuery, ExplorerVisibilityStore, ListConnections,
-    ListModels, OpenSession, QueryHistory, SaveConnection, SavedQueries, SuggestInline,
-    TestConnection, UiPrefsStore,
+    ListModels, OpenSession, QueryHistory, SaveConnection, SavedQueries, StorageConnections,
+    SuggestInline, TestConnection, UiPrefsStore,
 };
 
 /// The adapters (as ports) the use cases need.
@@ -64,7 +64,7 @@ pub struct UseCases {
     pub suggest_inline: SuggestInline,
     pub export: ExportOptions,
     /// The export destinations the user configured.
-    pub destinations: Arc<DestinationRegistry>,
+    pub destinations: Arc<StorageConnections>,
     pub ui_prefs: UiPrefsStore,
     pub saved_queries: SavedQueries,
     pub explorer_visibility: ExplorerVisibilityStore,
@@ -98,7 +98,13 @@ impl UseCases {
             assistant: Assistant::new(providers.clone(), SCHEMA_TOKEN_BUDGET),
             suggest_inline: SuggestInline::new(providers.clone(), settings.clone()),
             export: ExportOptions::default(),
-            destinations: Arc::new(DestinationRegistry::new()),
+            destinations: Arc::new(StorageConnections::new(
+                settings.clone(),
+                secrets.clone(),
+                Vec::new(),
+                Vec::new(),
+                DestinationRegistry::new(),
+            )),
             ui_prefs: UiPrefsStore::new(settings.clone()),
             saved_queries: SavedQueries::new(saved_queries, clock.clone()),
             explorer_visibility: ExplorerVisibilityStore::new(settings.clone()),
@@ -122,7 +128,7 @@ impl UseCases {
     }
 
     /// Sets the configured export destinations.
-    pub fn with_destinations(mut self, destinations: Arc<DestinationRegistry>) -> Self {
+    pub fn with_destinations(mut self, destinations: Arc<StorageConnections>) -> Self {
         self.destinations = destinations;
         self
     }
