@@ -19,6 +19,7 @@ storage = { path = "../storage" }
 db-mysql = { path = "../db-mysql" }
 db-postgres = { path = "../db-postgres" }
 db-sqlite = { path = "../db-sqlite" }
+db-clickhouse = { path = "../db-clickhouse" }
 llm-anthropic = { path = "../llm-anthropic" }
 llm-ollama = { path = "../llm-ollama" }
 llm-openai = { path = "../llm-openai" }

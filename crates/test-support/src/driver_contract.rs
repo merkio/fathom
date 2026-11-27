@@ -16,6 +16,26 @@ use secrecy::SecretString;
 /// Async sleep supplied by the caller's runtime.
 pub type Sleeper = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
 
+/// What the database under test cannot do. Each `false` skips the matching check; the default is
+/// a full relational database.
+#[derive(Debug, Clone, Copy)]
+pub struct Capabilities {
+    /// Enforces and reports foreign keys.
+    pub foreign_keys: bool,
+    /// `UPDATE` runs synchronously and reports how many rows it changed (analytical stores that
+    /// apply updates as background mutations do not).
+    pub update_row_counts: bool,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self {
+            foreign_keys: true,
+            update_row_counts: true,
+        }
+    }
+}
+
 /// Everything dialect-specific the suite needs.
 pub struct DriverFixture {
     pub profile: ConnectionProfile,
@@ -34,6 +54,7 @@ pub struct DriverFixture {
     pub teardown: Vec<String>,
     /// A statement that runs for at least 20 seconds unless cancelled.
     pub sleep_statement: String,
+    pub capabilities: Capabilities,
 }
 
 fn must<T, E: Debug>(r: Result<T, E>, what: &str) -> T {
@@ -79,8 +100,8 @@ pub async fn run_database_driver_contract(
 
     values(session.as_ref()).await;
     errors(session.as_ref()).await;
-    introspection(session.as_ref()).await;
-    writes_and_limits(session.as_ref()).await;
+    introspection(session.as_ref(), f).await;
+    writes_and_limits(session.as_ref(), f).await;
     timeout_and_cancel(session.as_ref(), f, &sleep).await;
 
     for sql in &f.teardown {
@@ -158,7 +179,7 @@ async fn errors(session: &dyn DbSession) {
     run(session, "SELECT 1").await;
 }
 
-async fn introspection(session: &dyn DbSession) {
+async fn introspection(session: &dyn DbSession, f: &DriverFixture) {
     let tree = must(session.introspect(IntrospectScope::All).await, "introspect");
 
     let parent = table(&tree, "contract_parent");
@@ -176,11 +197,18 @@ async fn introspection(session: &dyn DbSession) {
 
     let child = table(&tree, "contract_child");
     assert_eq!(child.primary_key, ["id"]);
-    assert_eq!(child.foreign_keys.len(), 1, "contract: foreign keys");
-    let fk = &child.foreign_keys[0];
-    assert_eq!(fk.columns, ["parent_id"]);
-    assert!(fk.referenced_table.eq_ignore_ascii_case("contract_parent"));
-    assert_eq!(fk.referenced_columns, ["id"]);
+    if f.capabilities.foreign_keys {
+        assert_eq!(child.foreign_keys.len(), 1, "contract: foreign keys");
+        let fk = &child.foreign_keys[0];
+        assert_eq!(fk.columns, ["parent_id"]);
+        assert!(fk.referenced_table.eq_ignore_ascii_case("contract_parent"));
+        assert_eq!(fk.referenced_columns, ["id"]);
+    } else {
+        assert!(
+            child.foreign_keys.is_empty(),
+            "contract: foreign keys reported by a database without them"
+        );
+    }
     assert!(
         child
             .indexes
@@ -203,7 +231,7 @@ async fn introspection(session: &dyn DbSession) {
     );
 }
 
-async fn writes_and_limits(session: &dyn DbSession) {
+async fn writes_and_limits(session: &dyn DbSession, f: &DriverFixture) {
     let r = run(session, "INSERT INTO contract_parent (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e')").await;
     assert_eq!(r.rows_affected, Some(5));
     assert!(r.rows.is_empty());
@@ -223,12 +251,14 @@ async fn writes_and_limits(session: &dyn DbSession) {
         "contract: limit equal to row count must not truncate"
     );
 
-    let r = run(
-        session,
-        "UPDATE contract_parent SET note = 'x' WHERE id <= 2",
-    )
-    .await;
-    assert_eq!(r.rows_affected, Some(2));
+    if f.capabilities.update_row_counts {
+        let r = run(
+            session,
+            "UPDATE contract_parent SET note = 'x' WHERE id <= 2",
+        )
+        .await;
+        assert_eq!(r.rows_affected, Some(2));
+    }
 
     let r = run(session, "SELECT id FROM contract_parent WHERE id < 0").await;
     assert!(r.rows.is_empty() && !r.truncated);

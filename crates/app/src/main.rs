@@ -110,6 +110,7 @@ fn main() -> anyhow::Result<()> {
     drivers.register(Arc::new(db_postgres::PostgresDriver::new()));
     drivers.register(Arc::new(db_mysql::MySqlDriver::new()));
     drivers.register(Arc::new(db_sqlite::SqliteDriver::new()));
+    drivers.register(Arc::new(db_clickhouse::ClickHouseDriver::new()));
 
     let secrets = secret_store();
     let llm = llm_providers(secrets.clone())?;

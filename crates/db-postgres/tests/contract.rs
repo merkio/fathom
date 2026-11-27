@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use db_postgres::PostgresDriver;
 use secrecy::SecretString;
-use test_support::driver_contract::{DriverFixture, Sleeper, run_database_driver_contract};
+use test_support::driver_contract::{
+    Capabilities, DriverFixture, Sleeper, run_database_driver_contract,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn postgres_passes_the_driver_contract() {
@@ -40,6 +42,7 @@ async fn postgres_passes_the_driver_contract() {
             "DROP TABLE IF EXISTS contract_parent".into(),
         ],
         sleep_statement: "SELECT pg_sleep(30)".into(),
+        capabilities: Capabilities::default(),
     };
     let sleep: Sleeper = Arc::new(|d: Duration| Box::pin(tokio::time::sleep(d)));
     run_database_driver_contract(&PostgresDriver::new(), &fixture, sleep).await;
