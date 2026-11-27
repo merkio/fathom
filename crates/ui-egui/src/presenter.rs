@@ -144,6 +144,8 @@ pub struct Presenter {
     connect_after_save: bool,
     /// Text in the explorer's "Find an object" box (filters tables by name).
     pub explorer_filter: String,
+    /// The table last clicked in the explorer (session, schema, table), highlighted there.
+    pub explorer_selected: Option<(SessionId, String, String)>,
     /// Where the editor cursor was last drawn (tab, byte offset), for the status bar.
     last_cursor: Option<(TabId, usize)>,
     dialects: Vec<(DriverKind, Dialect)>,
@@ -206,6 +208,7 @@ impl Presenter {
             choose_after_connect: None,
             connect_after_save: false,
             explorer_filter: String::new(),
+            explorer_selected: None,
             last_cursor: None,
             dialects,
             next_tab: 1,
@@ -646,6 +649,21 @@ impl Presenter {
         }
     }
 
+    /// Closes the inline AI bar's reply (the reply is not kept).
+    pub fn ai_dismiss(&mut self) {
+        if !self.ai.is_streaming() {
+            self.ai.run = None;
+        }
+    }
+
+    /// Shows the History/AI panel on the AI tab (provider, model and key live there).
+    pub fn open_ai_panel(&mut self) {
+        self.right_panel = RightPanel::Ai;
+        if !self.prefs.side_panel {
+            self.toggle_side_panel();
+        }
+    }
+
     pub fn ai_current_settings(&self) -> &AiSettings {
         &self.ai.settings
     }
@@ -1029,6 +1047,11 @@ impl Presenter {
                 }
             }
         }
+    }
+
+    /// Shows a short note in the status bar.
+    pub fn status_info(&mut self, message: impl Into<String>) {
+        self.status = Some(Status::Info(message.into()));
     }
 
     fn error(&mut self, message: String) {
@@ -1699,7 +1722,8 @@ mod tests {
     #[test]
     fn panel_toggles_flip_and_save_the_whole_layout() {
         let mut p = presenter();
-        assert!(p.prefs.explorer && p.prefs.results && p.prefs.side_panel);
+        assert!(p.prefs.explorer && p.prefs.results, "shown by default");
+        assert!(!p.prefs.side_panel, "the History/AI panel is opt-in");
         p.toggle_explorer();
         p.toggle_results();
         p.toggle_side_panel();
@@ -1708,7 +1732,7 @@ mod tests {
         assert!(matches!(
             cmds.last(),
             Some(Command::SaveUiPrefs(prefs))
-                if !prefs.explorer && !prefs.results && !prefs.side_panel
+                if !prefs.explorer && !prefs.results && prefs.side_panel
         ));
     }
 
@@ -2788,10 +2812,13 @@ mod tests {
                 table: "customers".into()
             }
         );
-        let tabs_before = p.tabs.len();
         p.take_commands();
         p.palette_accept();
-        assert_eq!(p.tabs.len(), tabs_before + 1);
+        assert_eq!(
+            p.tabs.len(),
+            1,
+            "the empty editor of that instance is reused"
+        );
         let text = p.selected_tab().map(|t| t.text.clone()).unwrap_or_default();
         assert_eq!(text, "SELECT * FROM \"public\".\"customers\" LIMIT 100;");
         assert!(
@@ -3573,5 +3600,145 @@ mod tests {
         p.handle(Event::SavedQueries(Err("disk".into())));
         assert_eq!(p.saved, vec![q]);
         assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("disk")));
+    }
+
+    // ---- grid viewing: filter, select all, copy, refresh -------------------------------------
+
+    #[test]
+    fn the_filter_hides_rows_without_the_text_in_any_cell_and_keeps_their_indexes() {
+        let (mut p, tab) = grid_ready();
+        assert_eq!(p.visible_rows(tab), [0, 1, 2]);
+        p.set_filter(tab, "  EMMA ".into());
+        assert_eq!(
+            p.visible_rows(tab),
+            [2],
+            "case-insensitive, trimmed, original index kept"
+        );
+        p.set_filter(tab, "pro".into());
+        assert_eq!(p.visible_rows(tab), [2]);
+        p.set_filter(tab, "zzz".into());
+        assert!(p.visible_rows(tab).is_empty());
+        p.toggle_filter(tab);
+        p.toggle_filter(tab);
+        assert_eq!(
+            p.visible_rows(tab).len(),
+            3,
+            "closing the box clears the filter"
+        );
+    }
+
+    #[test]
+    fn select_all_ticks_the_visible_rows_and_toggles_back() {
+        let (mut p, tab) = grid_ready();
+        p.set_filter(tab, "o".into()); // Olivia, Liam? no: Olivia and Emma? checks below
+        let visible = p.visible_rows(tab);
+        p.toggle_select_all(tab);
+        let g = p.grid_snapshot(tab);
+        assert_eq!(g.selected.iter().copied().collect::<Vec<_>>(), visible);
+        p.toggle_select_all(tab);
+        assert!(p.grid_snapshot(tab).selected.is_empty());
+    }
+
+    #[test]
+    fn copying_gives_a_header_and_the_ticked_rows_as_tab_separated_text() {
+        let (mut p, tab) = grid_ready();
+        assert_eq!(p.copy_selected_text(tab), None, "nothing ticked");
+        p.toggle_row_selected(tab, 1); // Liam, plan NULL
+        p.toggle_row_selected(tab, 0);
+        assert_eq!(
+            p.copy_selected_text(tab).as_deref(),
+            Some("id\tname\tplan\n1042\tOlivia\tFree\n1041\tLiam\t"),
+            "rows in grid order, NULL as an empty cell"
+        );
+    }
+
+    #[test]
+    fn copy_keeps_the_table_rectangular_when_values_contain_tabs_and_line_breaks() {
+        let (mut p, tab) = grid_ready();
+        if let TabState::Done(r) = &mut p.tabs[0].state {
+            r.rows[0][1] = domain::Value::Text("a\tb\nc".into());
+        }
+        p.toggle_row_selected(tab, 0);
+        let text = p.copy_selected_text(tab).expect("text");
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.contains("a b c"), "{text}");
+    }
+
+    #[test]
+    fn edit_starts_in_the_first_non_key_cell_of_the_first_ticked_row() {
+        let (mut p, tab) = grid_ready();
+        p.edit_selected_row(tab);
+        assert_eq!(p.tabs[0].grid.editing, None, "nothing ticked");
+        p.toggle_row_selected(tab, 2);
+        p.toggle_row_selected(tab, 1);
+        p.edit_selected_row(tab);
+        assert_eq!(
+            p.tabs[0].grid.editing,
+            Some((1, 1)),
+            "row 1, the first column that is not the id"
+        );
+    }
+
+    #[test]
+    fn refresh_reruns_the_statement_but_never_drops_staged_edits() {
+        let (mut p, tab) = grid_ready();
+        p.refresh_results(tab);
+        assert!(matches!(
+            p.take_commands().as_slice(),
+            [Command::Execute { text, .. }] if text == "SELECT * FROM public.customers"
+        ));
+        p.handle(Event::QueryFinished {
+            tab,
+            result: Ok(customers_result()),
+        });
+        p.take_commands();
+        edit(&mut p, tab, 0, 2, "Pro");
+        p.refresh_results(tab);
+        assert!(p.take_commands().is_empty());
+        assert!(p.tabs[0].grid.has_pending(), "the edit survives");
+        assert!(matches!(&p.status, Some(Status::Error(m)) if m.contains("pending changes")));
+    }
+
+    #[test]
+    fn dismissing_clears_a_finished_reply_but_never_a_running_one() {
+        let (mut p, _) = ai_ready();
+        p.ai.input = "show customers".into();
+        p.ai_ask(AiMode::Generate);
+        assert!(p.ai.is_streaming());
+        p.ai_dismiss();
+        assert!(p.ai.run.is_some(), "a running request is not dismissed");
+    }
+
+    #[test]
+    fn opening_the_ai_panel_shows_it_on_the_ai_tab_and_saves_the_layout() {
+        let mut p = presenter();
+        assert!(!p.prefs.side_panel);
+        p.open_ai_panel();
+        assert!(p.prefs.side_panel);
+        assert_eq!(p.right_panel, RightPanel::Ai);
+        assert!(
+            matches!(p.take_commands().as_slice(), [Command::SaveUiPrefs(prefs)] if prefs.side_panel)
+        );
+        p.open_ai_panel();
+        assert!(
+            p.take_commands().is_empty(),
+            "already open: nothing to save"
+        );
+    }
+
+    #[test]
+    fn taking_back_one_row_keeps_the_others_and_closes_an_empty_review() {
+        let (mut p, tab) = grid_ready();
+        edit(&mut p, tab, 0, 2, "Pro");
+        p.toggle_row_selected(tab, 2);
+        p.stage_delete_selected(tab);
+        p.open_review(tab);
+        let lines = p.review_lines(tab);
+        assert_eq!(lines.iter().map(|l| l.index).collect::<Vec<_>>(), [0, 2]);
+        p.unstage_row(tab, 2);
+        assert_eq!(p.pending_counts(tab), (1, 0));
+        assert!(p.tabs[0].grid.review_open, "something is still staged");
+        p.unstage_row(tab, 0);
+        assert!(!p.tabs[0].grid.has_pending() && !p.tabs[0].grid.review_open);
     }
 }

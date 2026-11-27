@@ -30,6 +30,10 @@ pub struct GridState {
     pub editing: Option<(usize, usize)>,
     pub draft: String,
     pub review_open: bool,
+    /// Text typed into the grid's filter box (rows without it are hidden), and whether the box
+    /// is showing.
+    pub filter: String,
+    pub filter_open: bool,
     /// An apply is in flight.
     pub applying: bool,
 }
@@ -44,6 +48,8 @@ impl GridState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewLine {
     pub kind: ReviewKind,
+    /// The row's index in the result (to take its change back).
+    pub index: usize,
     /// The row's primary key, for display.
     pub row: String,
     /// `(column, old, new)` for updates; empty for deletes.
@@ -206,6 +212,18 @@ impl Presenter {
     pub fn unstage_delete(&mut self, tab: TabId, row: usize) {
         if let Some(g) = self.grid_mut(tab) {
             g.deleted.remove(&row);
+        }
+    }
+
+    /// Takes back everything staged for one row (its edits, or its deletion). Closes the review
+    /// when nothing is left.
+    pub fn unstage_row(&mut self, tab: TabId, row: usize) {
+        if let Some(g) = self.grid_mut(tab) {
+            g.edits.retain(|(r, _), _| *r != row);
+            g.deleted.remove(&row);
+            if !g.has_pending() {
+                g.review_open = false;
+            }
         }
     }
 
@@ -373,6 +391,7 @@ impl Presenter {
                     .unwrap_or_default();
                 lines.push(ReviewLine {
                     kind: ReviewKind::Delete,
+                    index: row,
                     row: row_label(row),
                     columns: Vec::new(),
                     label,
@@ -390,6 +409,7 @@ impl Presenter {
                     .collect();
                 lines.push(ReviewLine {
                     kind: ReviewKind::Update,
+                    index: row,
                     row: row_label(row),
                     columns,
                     label: String::new(),
@@ -411,6 +431,127 @@ impl Presenter {
     /// A copy of the staged state for the view to read while it holds other borrows.
     pub fn grid_snapshot(&self, tab: TabId) -> GridState {
         self.grid(tab).cloned().unwrap_or_default()
+    }
+
+    // ---- viewing: filter, selection, copy, refresh -------------------------------------------
+
+    /// Indexes of the result rows that match the filter (all of them without a filter). Staged
+    /// edits and selections stay keyed by the row's index in the full result.
+    pub fn visible_rows(&self, tab: TabId) -> Vec<usize> {
+        let Some(result) = self.result_of(tab) else {
+            return Vec::new();
+        };
+        let filter = self
+            .grid(tab)
+            .map(|g| g.filter.trim().to_lowercase())
+            .unwrap_or_default();
+        (0..result.rows.len())
+            .filter(|i| {
+                filter.is_empty()
+                    || result.rows[*i]
+                        .iter()
+                        .any(|v| v.display().to_lowercase().contains(&filter))
+            })
+            .collect()
+    }
+
+    pub fn toggle_filter(&mut self, tab: TabId) {
+        if let Some(g) = self.grid_mut(tab) {
+            g.filter_open = !g.filter_open;
+            if !g.filter_open {
+                g.filter.clear();
+            }
+        }
+    }
+
+    pub fn set_filter(&mut self, tab: TabId, text: String) {
+        if let Some(g) = self.grid_mut(tab) {
+            g.filter = text;
+        }
+    }
+
+    /// Ticks every visible row, or clears the selection when they are all ticked already.
+    pub fn toggle_select_all(&mut self, tab: TabId) {
+        let visible = self.visible_rows(tab);
+        if let Some(g) = self.grid_mut(tab) {
+            if !visible.is_empty() && visible.iter().all(|r| g.selected.contains(r)) {
+                for r in &visible {
+                    g.selected.remove(r);
+                }
+            } else {
+                g.selected.extend(visible);
+            }
+        }
+    }
+
+    /// The ticked rows as tab-separated text with a header line, ready for a spreadsheet.
+    /// `None` when nothing is ticked. NULL is an empty cell; tabs and line breaks inside a value
+    /// become spaces so the table stays rectangular.
+    pub fn copy_selected_text(&self, tab: TabId) -> Option<String> {
+        let result = self.result_of(tab)?;
+        let g = self.grid(tab)?;
+        if g.selected.is_empty() {
+            return None;
+        }
+        let clean = |v: &Value| {
+            if v.is_null() {
+                String::new()
+            } else {
+                v.display().replace(['\t', '\n', '\r'], " ")
+            }
+        };
+        let mut lines = vec![
+            result
+                .columns
+                .iter()
+                .map(|c| c.name.replace(['\t', '\n', '\r'], " "))
+                .collect::<Vec<_>>()
+                .join("\t"),
+        ];
+        for row in g.selected.iter().filter_map(|i| result.rows.get(*i)) {
+            lines.push(row.iter().map(clean).collect::<Vec<_>>().join("\t"));
+        }
+        Some(lines.join("\n"))
+    }
+
+    /// "Edit": starts typing in the first editable cell of the first ticked row.
+    pub fn edit_selected_row(&mut self, tab: TabId) {
+        let Some(row) = self
+            .grid(tab)
+            .and_then(|g| g.selected.iter().next().copied())
+        else {
+            return;
+        };
+        let Some(source) = self.grid_source(tab) else {
+            return;
+        };
+        let first = self.result_of(tab).and_then(|r| {
+            r.columns
+                .iter()
+                .position(|c| !Self::is_key_column(&source, &c.name))
+        });
+        if let Some(col) = first {
+            self.begin_cell_edit(tab, row, col);
+        }
+    }
+
+    /// "Refresh": shows what the database has now by running the statement again. Refused while
+    /// edits are staged, because a new result would discard them.
+    pub fn refresh_results(&mut self, tab: TabId) {
+        if self.grid(tab).is_some_and(GridState::has_pending) {
+            self.status = Some(Status::Error(
+                "Apply or discard the pending changes first; a refresh would drop them.".into(),
+            ));
+            return;
+        }
+        if self
+            .tabs
+            .iter()
+            .any(|t| t.id == tab && matches!(t.state, TabState::Running))
+        {
+            return;
+        }
+        self.rerun_executed(tab);
     }
 
     pub fn set_draft(&mut self, tab: TabId, text: String) {
