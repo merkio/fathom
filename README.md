@@ -107,7 +107,7 @@ MySQL/MariaDB: set `FATHOM_TEST_MYSQL_HOST` (and `_PORT`, `_USER`, `_PASSWORD`, 
 
 ClickHouse: set `FATHOM_TEST_CLICKHOUSE_HOST` (and `_PORT`, `_USER`, `_PASSWORD`, `_DB`) and run
 `cargo test -p db-clickhouse --features integration`. Use a recent server: indexes and the
-rows-written header need ClickHouse 19+, and CI runs `latest` and `lts`.
+rows-written header need ClickHouse 19+, and CI runs `latest` and the 25.8 LTS.
 
 TLS tests additionally need `FATHOM_TEST_PG_TLS_CA` and `FATHOM_TEST_PG_TLS_OTHER_CA` (paths to a
 CA that signed the server certificate, and to an unrelated CA); without them they skip.
